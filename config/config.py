@@ -64,12 +64,33 @@ class SimConfig:
     sardine_size: float = 6.0          # half-length of body triangle (px); body ≈ 18 px
     background_color: tuple[int, int, int, int] = (0, 20, 50, 255)   # deep-water blue
 
-    # ── Velocity-based coloring ───────────────────────────────────────
-    # When True, sardine color is derived each frame from the fish's linear
-    # speed and rotational (turn) rate, so schooling fish share similar hues
-    # while scattered or fleeing fish diverge in color.
-    # Toggle at runtime via the config menu or the 'V' key.
-    use_velocity_coloring: bool = False
+    # ── Sardine color mode ────────────────────────────────────────────
+    # Selects which color palette is applied to sardines each frame.
+    # Valid modes (cycle with ← / → in the VISUAL config menu section):
+    #
+    #   "white"   — static silvery white (default; no per-frame color work)
+    #   "rainbow" — full HSV color wheel keyed to heading + speed + turn rate
+    #   "cool"    — blues / teals / purples (hue band constrained)
+    #   "warm"    — reds / oranges / yellows (hue band constrained)
+    #   "ocean"   — deep aquatic blue-teal-green (slightly dimmer)
+    #   "sunset"  — purples / magentas / pinks with orange wrap
+    #   "mono"    — grayscale; brightness encodes speed
+    #
+    # All dynamic modes (everything except "white") still respect the
+    # vel_color_* weighting fields below.
+    sardine_color_mode: str = "white"
+
+    # Per-channel kinematic weights for all dynamic sardine color modes.
+    # Dimensionless multipliers; 0.0 = that channel is silent.
+    #
+    # Heading weight (0–2):  scales how much heading cycles through the palette.
+    # Speed weight (0–2):    hue offset from forward speed (≤¼ wheel at w=1).
+    # Turn weight (0–2):     how aggressively turning desaturates the color.
+    # Smoothing (0–0.99):    EMA coefficient for per-fish turn-rate estimate.
+    vel_color_heading_weight: float = 1.0
+    vel_color_speed_weight:   float = 0.5
+    vel_color_turn_weight:    float = 1.0
+    vel_color_smoothing:      float = 0.85
 
     # ── Sailfish (Phase 2) ────────────────────────────────────────────
     num_sailfish: int = 8
@@ -87,8 +108,16 @@ class SimConfig:
     # Multiplier on the Reynolds pursuit steer force.
     weight_pursuit: float = 1.5
 
-    sailfish_size: float = 12.0                                        # 2× sardine; body ≈ 36 px
-    sailfish_color: tuple[int, int, int, int] = (220, 80, 40, 255)    # orange-red predator
+    sailfish_size: float = 12.0     # 2× sardine; body ≈ 36 px
+
+    # Sailfish color mode — selects a fixed color for all sailfish.
+    # Valid modes (cycle with ← / → in the VISUAL config menu section):
+    #   "default" — vivid orange-red (high contrast against dark background)
+    #   "white"   — silvery white
+    #   "red"     — bright red
+    #   "blue"    — electric blue
+    #   "black"   — near-black (still visible against the dark background)
+    sailfish_color_mode: str = "default"
 
     # ── Sardine flee / predator-awareness ─────────────────────────────
     radius_flee: float = 100.0      # px; sailfish within this trigger escape

@@ -19,6 +19,7 @@ here.
 from __future__ import annotations
 
 import math
+import random
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -190,5 +191,11 @@ class Sardine(Boid):
 
         # ── 5. Noise: small random perturbation ──────────────────────────
         if cfg.weight_noise > 0.0:
-            nv = np.random.randn(2)
-            self._steer_apply_xy(float(nv[0]), float(nv[1]), cfg.weight_noise)
+            # random.gauss(0, 1) returns a Python float — zero allocation,
+            # no numpy dispatch.  Replaces the previous np.random.randn(2)
+            # which allocated a (2,) array per sardine per frame.
+            self._steer_apply_xy(
+                random.gauss(0.0, 1.0),
+                random.gauss(0.0, 1.0),
+                cfg.weight_noise,
+            )

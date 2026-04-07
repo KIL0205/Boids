@@ -7,23 +7,45 @@ Draws each sardine as a heading-oriented filled triangle inside a single
 pyglet Batch.  The batch is submitted to the GPU with one draw call per
 frame, so this layer has minimal overhead for up to ~500 agents.
 
-Velocity-based coloring
+Dynamic palette coloring
 -----------------------
-When ``config.use_velocity_coloring`` is ``True``, sardine color is derived
-each frame from two per-fish quantities:
+Sardine color is derived each frame from three per-fish kinematic channels:
 
-* **Forward speed** (normalised to [0, 1] relative to ``sardine_max_speed``)
-  maps to HSV **hue** in the blue-cyan-green range (0.5–0.75 in [0,1]).
-  Slow fish appear deeper blue; fast fish shift toward cyan/teal.
+* **Heading direction** — maps the fish's travel angle (0–360°) to the
+  current palette.  Fish swimming in the same direction share the same base
+  hue, so an aligned school forms a tight color cluster.
 
-* **Turn rate** (angular velocity, estimated from the heading-change over
-  consecutive frames) maps to HSV **saturation**.  Straight-swimming fish
-  get saturated, vivid hues; fish in tight turns desaturate toward grey-white
-  to give a "stress" signal.  A 0.9-weight exponential smoother on the
-  per-fish heading tames frame-to-frame noise without adding lag.
+* **Linear speed** — adds a fractional hue offset (up to ¼ wheel) so faster
+  fish within the same school shift visibly, giving a speed-cohort signal.
 
-Result: fish schooling together share speed and heading, so they converge
-to similar colours.  Fleeing / scattered fish diverge visibly.
+* **Turn rate (rotational velocity)** — reduces saturation as the fish turns.
+  Straight-swimming fish are vivid; tight turners desaturate toward grey.
+  A configurable EMA smoother tames frame-to-frame jitter.
+
+The heading contribution is computed as ``atan2(vy, vx) / (2π) % 1.0`` which
+maps direction to a ``[0, 1)`` parameter.  For **rainbow** mode this parameter
+is used directly as the HSV hue (hue 0 ≡ hue 1 = red, so the full wheel is
+seamlessly cyclic).  For **restricted palettes** (cool / warm / ocean / sunset)
+a cosine mapping oscillates smoothly within the palette band::
+
+    hue = (hue_center + band_half * cos(raw_hue * 2π)) % 1.0
+
+This guarantees that ``raw_hue = 0`` and ``raw_hue = 1`` produce identical
+colors, eliminating the flicker that a linear ramp would cause whenever the
+heading + speed sum wraps through 1.0.
+
+All three contributions are weighted independently via ``SimConfig`` fields
+(``vel_color_heading_weight``, ``vel_color_speed_weight``,
+``vel_color_turn_weight``), so the balance can be tuned at runtime.
+
+Toggle-off bug fix
+------------------
+The previous implementation let stale velocity colors persist on triangles
+when the mode was disabled because ``_sync_shapes()`` updates vertex
+positions but never touches ``tri.color``.  The fix: ``Renderer`` tracks
+the previous ``use_velocity_coloring`` value.  On the first frame after
+transitioning to OFF, all sardine triangles are explicitly reset to
+``_SARDINE_COLOR`` in a single O(N) pass before the normal position sync.
 
 Interface
 ---------
@@ -49,27 +71,40 @@ if TYPE_CHECKING:
     from sim.simulation import Simulation
 
 
-# Sardine fill colour — cool silvery blue-white against deep-water background.
+# Sardine default fill colour — silvery blue-white on deep-water background.
 _SARDINE_COLOR: tuple[int, int, int, int] = (210, 240, 230, 255)
-# Sailfish fill colour — vivid orange-red so predators stand out clearly.
-_SAILFISH_COLOR: tuple[int, int, int, int] = (220, 80, 40, 255)
 
-# HSV hue range for velocity-coloring mode (blue → cyan → teal).
-_VEL_HUE_MIN: float = 0.50   # blue   (slow fish)
-_VEL_HUE_MAX: float = 0.80   # teal   (fast fish)
-# Saturation range — high sat for straight swimming, lower for tight turns.
-_VEL_SAT_MIN: float = 0.30   # desaturated (high turn rate)
-_VEL_SAT_MAX: float = 0.95   # vivid       (straight swim)
-# Value (brightness) — kept constant so the school is always visible.
-_VEL_VAL:     float = 0.95
+# ── Sailfish per-mode fixed colors ───────────────────────────────────────────
+# Keyed by ``config.sailfish_color_mode``.  All RGBA.
+_SAILFISH_COLORS: dict[str, tuple[int, int, int, int]] = {
+    "default": (220,  80,  40, 255),   # vivid orange-red (high contrast)
+    "white":   (240, 245, 248, 255),   # silvery white
+    "red":     (215,  30,  30, 255),   # bright red
+    "blue":    ( 40,  90, 215, 255),   # electric blue
+    "black":   ( 25,  30,  40, 255),   # near-black (still visible on dark bg)
+}
+# Fallback when an unknown mode appears at runtime.
+_SAILFISH_COLOR_DEFAULT: tuple[int, int, int, int] = _SAILFISH_COLORS["default"]
 
-# Exponential smoothing coefficient for turn-rate estimates (0 = no smooth).
-# 0.85 gives ~6-frame time constant at 60 fps — damps noise while responding
-# to genuine turns within ~0.1 s.
-_TURN_SMOOTH: float = 0.85
+# ── Sardine palette system ────────────────────────────────────────────────────
+# Each entry: (hue_min, hue_max, brightness_value)
+# The motion-derived raw_hue in [0,1] is remapped into [hue_min, hue_max].
+# hue_max - hue_min >= 1.0 means full wheel ("rainbow" mode).
+# hue_max > 1.0 wraps via `% 1.0`, allowing palettes that span the 0 degree boundary.
+# "mono" is handled as a special case (brightness encodes speed; sat near 0).
+_PALETTE_BANDS: dict[str, tuple[float, float, float]] = {
+    "rainbow": (0.00,  1.00, 0.95),   # full HSV wheel
+    "cool":    (0.50,  0.80, 0.90),   # teal -> blue -> purple
+    "warm":    (0.02,  0.17, 0.95),   # red -> orange -> yellow
+    "ocean":   (0.47,  0.62, 0.82),   # cyan -> teal -> blue (deeper/muted)
+    "sunset":  (0.74,  1.08, 0.90),   # purple -> magenta -> pink-orange (wraps)
+}
 
-# How many frames since heading capture before initialising (avoids t=0 jump).
-_HEADING_INIT_FRAMES: int = 1
+# HSV constants shared by all dynamic palette modes.
+_VEL_SAT_MIN: float = 0.15           # saturation floor (no fully-gray fish)
+_VEL_SPEED_HUE_RANGE: float = 0.25   # max hue shift from speed at w_speed=1
+_VEL_TURN_REF: float = math.pi / 6.0 # reference turn rate for saturation scaling
+_TWO_PI: float = 2.0 * math.pi
 
 
 def _hsv_to_rgb(h: float, s: float, v: float) -> tuple[int, int, int]:
@@ -151,8 +186,9 @@ class Hud:
             n_f = len(simulation.sailfish)
             W = simulation.config.window_width
             H = simulation.config.window_height
-            vel_str = " [VEL COLOR]" if simulation.config.use_velocity_coloring else ""
-            counts = f"Sardines {n_s}  |  Sailfish {n_f}  |  Total {n_s + n_f}{vel_str}"
+            color_mode = simulation.config.sardine_color_mode
+            color_str  = f" [{color_mode.upper()}]" if color_mode != "white" else ""
+            counts = f"Sardines {n_s}  |  Sailfish {n_f}  |  Total {n_s + n_f}{color_str}"
             dims = f"World {W} \u00d7 {H} px"
         except Exception:
             counts = "Sardines n/a  |  Sailfish n/a"
@@ -163,7 +199,7 @@ class Hud:
             f"{counts}\n"
             f"{dims}\n"
             f"\u2191/\u2193 sardines (+/-50)  \u2190/\u2192 sailfish (+/-1)  "
-            f"F fullscreen  H HUD  V vel-color  TAB config"
+            f"F fullscreen  H HUD  V color-mode  TAB config"
         )
 
     def reposition(self, window_height: int) -> None:
@@ -198,6 +234,12 @@ class Renderer:
         # Per-fish velocity-color state (rebuilt in reset()).
         self._vel_states: list[_VelColorState] = []
 
+        # Track previous color modes to detect transitions.
+        # On sardine-mode change: reset EMA state; restore white if going to "white".
+        # On sailfish-mode change: repaint all sailfish triangles in one O(N) pass.
+        self._prev_sardine_mode: str = config.sardine_color_mode
+        self._prev_sailfish_mode: str = config.sailfish_color_mode
+
         r, g, b, a = config.background_color
         gl.glClearColor(r / 255.0, g / 255.0, b / 255.0, a / 255.0)
 
@@ -222,8 +264,11 @@ class Renderer:
         self._sardine_shapes = self._make_shapes(
             sardines, float(self._config.sardine_size), _SARDINE_COLOR
         )
+        sailfish_color = _SAILFISH_COLORS.get(
+            self._config.sailfish_color_mode, _SAILFISH_COLOR_DEFAULT
+        )
         self._sailfish_shapes = self._make_shapes(
-            sailfish or [], float(self._config.sailfish_size), self._config.sailfish_color
+            sailfish or [], float(self._config.sailfish_size), sailfish_color
         )
 
         # Allocate (or resize) velocity-color state for each sardine.
@@ -238,27 +283,57 @@ class Renderer:
         """
         t0 = time.perf_counter()
 
-        cfg = simulation.config
-        if cfg.use_velocity_coloring:
+        cfg           = simulation.config
+        sardine_mode  = cfg.sardine_color_mode
+        sailfish_mode = cfg.sailfish_color_mode
+        # Cache size floats once — avoids repeated float() coercions on the
+        # frozen-dataclass fields during every call to _sync_shapes*.
+        sardine_size_f  = float(cfg.sardine_size)
+        sailfish_size_f = float(cfg.sailfish_size)
+
+        # ── Detect sardine color-mode transitions ─────────────────────────
+        if sardine_mode != self._prev_sardine_mode:
+            # Reset per-fish EMA state so the first frame after a switch has
+            # no stale turn-rate estimate regardless of which mode we enter.
+            for vs in self._vel_states:
+                vs.frames = 0
+            if sardine_mode == "white":
+                # One-shot restore: _sync_shapes only writes vertex positions,
+                # never colors, so without this pass triangles would keep
+                # whatever palette colors they had from the previous mode.
+                for tri in self._sardine_shapes:
+                    tri.color = _SARDINE_COLOR
+            self._prev_sardine_mode = sardine_mode
+
+        if sardine_mode == "white":
+            _sync_shapes(
+                self._sardine_shapes, simulation.sardines,
+                sardine_size_f,
+            )
+        else:
             _sync_shapes_vel_color(
                 self._sardine_shapes,
                 simulation.sardines,
-                float(cfg.sardine_size),
+                sardine_size_f,
                 float(cfg.sardine_max_speed),
                 self._vel_states,
+                cfg.vel_color_heading_weight,
+                cfg.vel_color_speed_weight,
+                cfg.vel_color_turn_weight,
+                cfg.vel_color_smoothing,
+                sardine_mode,
             )
-        else:
-            _sync_shapes(
-                self._sardine_shapes, simulation.sardines,
-                float(cfg.sardine_size),
-            )
-            # Reset vel states so they initialise cleanly if mode is toggled on.
-            for vs in self._vel_states:
-                vs.frames = 0
+
+        # ── Detect sailfish color-mode transitions ────────────────────────
+        if sailfish_mode != self._prev_sailfish_mode:
+            color = _SAILFISH_COLORS.get(sailfish_mode, _SAILFISH_COLOR_DEFAULT)
+            for tri in self._sailfish_shapes:
+                tri.color = color
+            self._prev_sailfish_mode = sailfish_mode
 
         _sync_shapes(
             self._sailfish_shapes, simulation.sailfish,
-            float(cfg.sailfish_size),
+            sailfish_size_f,
         )
         self._batch.draw()
         self._last_render_ms = (time.perf_counter() - t0) * 1000.0
@@ -315,7 +390,7 @@ def _sync_shapes(
     for tri, agent in zip(shapes, agents):
         px, py = float(agent.position[0]), float(agent.position[1])
         vx, vy = float(agent.velocity[0]), float(agent.velocity[1])
-        mag = (vx * vx + vy * vy) ** 0.5
+        mag = math.sqrt(vx * vx + vy * vy)
         if mag > 1e-9:
             hx, hy = vx / mag, vy / mag
         else:
@@ -333,23 +408,67 @@ def _sync_shapes_vel_color(
     size: float,
     max_speed: float,
     vel_states: list[_VelColorState],
+    w_heading: float,
+    w_speed: float,
+    w_turn: float,
+    smoothing: float,
+    mode: str = "rainbow",
 ) -> None:
     """Like ``_sync_shapes`` but also updates each triangle's colour.
 
-    Color mapping
+    Palette modes
     -------------
-    * Hue:        linear speed / max_speed  → [HUE_MIN, HUE_MAX] (blue→teal)
-    * Saturation: turn rate (EMA-smoothed)  → [SAT_MAX, SAT_MIN]
-                  (vivid=straight, grey=turning)
-    * Value:      constant _VEL_VAL (keeps fish visible at all times)
+    *mode* is one of ``"rainbow"``, ``"cool"``, ``"warm"``, ``"ocean"``,
+    ``"sunset"``, or ``"mono"``.
 
-    Turn rate is estimated as |Δangle| / dt.  Because dt is not forwarded here
-    we use a simple frame-delta approximation: the EMA coefficient already
-    encodes the smoothing time constant.  For 60 fps the distinction between
-    using dt or frame-count is negligible.
+    **Rainbow** — full HSV wheel; motion-derived raw_hue used directly.
+
+    **Restricted palettes** (cool / warm / ocean / sunset) — raw_hue drives
+    a cyclic cosine mapping within the allowed hue band::
+
+        hue = (hue_center + band_half * cos(raw_hue * 2π)) % 1.0
+
+    where ``hue_center = (hue_min + hue_max) / 2`` and
+    ``band_half = (hue_max - hue_min) / 2``.  Because cos(0) = cos(2π),
+    ``raw_hue = 0`` and ``raw_hue = 1`` produce exactly the same hue —
+    eliminating the jump that the old linear ramp produced whenever the
+    cumulative heading + speed sum wrapped through 1.0 (previously visible
+    as a purple→teal flash for ``cool``, etc.).
+
+    School coherence is preserved: each palette oscillates smoothly between
+    ``hue_min`` and ``hue_max`` as direction rotates.  Two schools pointing
+    in exactly opposite directions land at the same palette position (cosine
+    symmetry), but in practice opposing schools diverge spatially and remain
+    visually distinct near the palette midpoint.
+
+    **Mono** — hue is irrelevant; saturation is near zero; value
+    (brightness) is derived from speed so fast fish are bright.
+
+    Color channels (shared by all non-mono modes)
+    -----------------------------------------------
+    * Hue   = raw_hue (rainbow) or
+              ``(hue_center + band_half * cos(raw_hue * 2π)) % 1.0``
+      where ``raw_hue = (heading_01 * w_heading
+                         + speed_norm * _VEL_SPEED_HUE_RANGE * w_speed) % 1.0``
+    * Sat   = ``max(_VEL_SAT_MIN, 1.0 - clamp(smooth_turn / _VEL_TURN_REF, 0,1)
+                   * w_turn * (1 - _VEL_SAT_MIN))``
+    * Value = brightness from ``_PALETTE_BANDS`` (0.82–0.95 depending on palette)
+
+    Emergent school coherence: fish sharing heading + speed share the same
+    raw_hue and therefore map to the same part of whatever palette is active.
     """
-    size2    = size * 2.0
-    inv_mspd = 1.0 / max(max_speed, 1.0)
+    band = _PALETTE_BANDS.get(mode, _PALETTE_BANDS["rainbow"])
+    hue_min, hue_max, vel_val = band
+    band_width    = hue_max - hue_min
+    full_wheel    = band_width >= 1.0   # skip remap for rainbow
+    is_mono       = (mode == "mono")
+    size2         = size * 2.0
+    inv_mspd      = 1.0 / max(max_speed, 1.0)
+    sat_range     = 1.0 - _VEL_SAT_MIN   # = 0.85
+    # Pre-computed cyclic palette geometry for restricted palettes.
+    # Cached outside the fish loop; negligible when full_wheel or is_mono.
+    hue_center    = (hue_min + hue_max) * 0.5
+    band_half     = band_width * 0.5
 
     for tri, agent, vs in zip(shapes, agents, vel_states):
         px, py = float(agent.position[0]), float(agent.position[1])
@@ -361,39 +480,47 @@ def _sync_shapes_vel_color(
         else:
             hx, hy = 1.0, 0.0
 
-        # ── Velocity positions ─────────────────────────────────────────
-        tri._x,  tri._y  = px + hx * size2,           py + hy * size2
-        tri._x2, tri._y2 = px - hx * size - hy * size, py - hy * size + hx * size
-        tri._x3, tri._y3 = px - hx * size + hy * size, py - hy * size - hx * size
+        # ── Vertex positions (same for every mode) ─────────────────────
+        tri._x,  tri._y  = px + hx * size2,             py + hy * size2
+        tri._x2, tri._y2 = px - hx * size - hy * size,  py - hy * size + hx * size
+        tri._x3, tri._y3 = px - hx * size + hy * size,  py - hy * size - hx * size
         tri._update_translation()
         tri._update_vertices()
 
-        # ── Colour computation ─────────────────────────────────────────
-        # --- Hue from forward speed ---
-        speed_norm = min(mag * inv_mspd, 1.0)
-        hue = _VEL_HUE_MIN + speed_norm * (_VEL_HUE_MAX - _VEL_HUE_MIN)
-
-        # --- Saturation from turn rate ---
-        cur_angle = math.atan2(hy, hx)
-        if vs.frames >= _HEADING_INIT_FRAMES:
-            # Δangle with wrap-around correction to [-π, π]
-            da = cur_angle - vs.prev_angle
-            if da >  math.pi: da -= 2.0 * math.pi
-            if da < -math.pi: da += 2.0 * math.pi
-            # |da| in radians/frame; smooth with EMA.
-            vs.smooth_turn = (
-                _TURN_SMOOTH * vs.smooth_turn + (1.0 - _TURN_SMOOTH) * abs(da)
-            )
-        vs.prev_angle = cur_angle
+        # ── Per-fish turn-rate EMA ────────────────────────────────────
+        angle = math.atan2(hy, hx)
+        if vs.frames >= 1:
+            da = angle - vs.prev_angle
+            if da >  math.pi: da -= _TWO_PI
+            if da < -math.pi: da += _TWO_PI
+            vs.smooth_turn = smoothing * vs.smooth_turn + (1.0 - smoothing) * abs(da)
+        vs.prev_angle = angle
         vs.frames += 1
 
-        # Map turn rate: 0 → SAT_MAX (vivid/straight), π/6 rad/frame → SAT_MIN.
-        # π/6 ≈ 30°/frame is an aggressive full-turn rate; most flocking turns
-        # are much smaller so saturation typically stays near SAT_MAX.
-        turn_norm = min(vs.smooth_turn / (math.pi / 6.0), 1.0)
-        sat = _VEL_SAT_MAX - turn_norm * (_VEL_SAT_MAX - _VEL_SAT_MIN)
+        # ── Color computation ─────────────────────────────────────────
+        speed_norm = min(mag * inv_mspd, 1.0)
+        turn_norm  = min(vs.smooth_turn / _VEL_TURN_REF, 1.0)
 
-        r, g, b = _hsv_to_rgb(hue, sat, _VEL_VAL)
+        if is_mono:
+            # Grayscale: brightness encodes speed; near-zero saturation.
+            value = max(0.30, min(0.95, 0.35 + speed_norm * 0.55 * w_speed))
+            sat   = 0.0
+            hue   = 0.58   # irrelevant but defined; slight blue-grey at low sat
+        else:
+            heading_01 = angle / _TWO_PI % 1.0
+            raw_hue = (heading_01 * w_heading
+                       + speed_norm * _VEL_SPEED_HUE_RANGE * w_speed) % 1.0
+            if full_wheel:
+                hue = raw_hue
+            else:
+                # Cyclic cosine mapping — cos(0) = cos(2π) so raw_hue=0
+                # and raw_hue=1 produce identical colors.  No jump at any
+                # heading or speed wrap boundary.
+                hue = (hue_center + band_half * math.cos(raw_hue * _TWO_PI)) % 1.0
+            sat   = max(_VEL_SAT_MIN, 1.0 - turn_norm * w_turn * sat_range)
+            value = vel_val
+
+        r, g, b = _hsv_to_rgb(hue, sat, value)
         tri.color = (r, g, b, 255)
 
 

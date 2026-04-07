@@ -96,6 +96,18 @@ class _ToggleItem:
 
 
 @dataclasses.dataclass(frozen=True)
+class _CycleItem:
+    """A string config field that cycles through a fixed ordered list of options.
+
+    ← / → (or Enter) step backward / forward through ``options``.
+    """
+
+    label:   str            # display label (max 16 chars)
+    field:   str            # SimConfig attribute name (must be str)
+    options: tuple[str, ...]  # ordered cycle list (non-empty)
+
+
+@dataclasses.dataclass(frozen=True)
 class _SaveRow:
     """A non-editable menu row that activates the save-to-disk action."""
     label: str = "Save to file"
@@ -109,7 +121,7 @@ class _GroupRow:
 
 # ── Row definitions ───────────────────────────────────────────────────────
 
-_ROWS: list[_MenuItem | _ToggleItem | _SaveRow | _GroupRow] = [
+_ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     _GroupRow("SARDINE FLOCKING"),
     _MenuItem("Sep weight",      "weight_separation",        0.1,   1.0,   0.0,   10.0),
     _MenuItem("Ali weight",      "weight_alignment",         0.1,   1.0,   0.0,   10.0),
@@ -131,7 +143,14 @@ _ROWS: list[_MenuItem | _ToggleItem | _SaveRow | _GroupRow] = [
     _MenuItem("Sailfish speed",  "sailfish_max_speed",      10.0,  50.0,  50.0,  600.0),
     _MenuItem("Sailfish force",  "sailfish_max_force",      10.0,  50.0,  10.0,  600.0),
     _GroupRow("VISUAL"),
-    _ToggleItem("Vel coloring",  "use_velocity_coloring"),
+    _CycleItem("Sardine color",      "sardine_color_mode",
+               ("white", "rainbow", "cool", "warm", "ocean", "sunset", "mono")),
+    _CycleItem("Sailfish color",     "sailfish_color_mode",
+               ("default", "white", "red", "blue", "black")),
+    _MenuItem("Vel heading wt",      "vel_color_heading_weight",  0.1, 0.5, 0.0, 2.0),
+    _MenuItem("Vel speed wt",        "vel_color_speed_weight",    0.1, 0.5, 0.0, 2.0),
+    _MenuItem("Vel turn wt",         "vel_color_turn_weight",     0.1, 0.5, 0.0, 2.0),
+    _MenuItem("Vel smoothing",       "vel_color_smoothing",       0.05, 0.1, 0.0, 0.99),
     _SaveRow(),
 ]
 
@@ -151,7 +170,7 @@ def _fmt_value(val: object) -> str:
 
 
 def _row_text(
-    item: "_MenuItem | _ToggleItem | _SaveRow",
+    item: "_MenuItem | _ToggleItem | _CycleItem | _SaveRow",
     cfg: object,
     is_selected: bool,
     save_state: str = "",
@@ -177,14 +196,15 @@ def _row_text(
     return f"{prefix}{item.label:<16}{val_str:>8}"
 
 
-def _footer_text(item: "_MenuItem | _ToggleItem | _SaveRow | _GroupRow") -> str:
+def _footer_text(item: "_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow") -> str:
     """One-line hint for the currently selected row."""
     if isinstance(item, _GroupRow):
         return ""
     if isinstance(item, _SaveRow):
         return "  \u21b5 Enter / \u2190\u2192  \u00b7  saves to boids_overrides.json"
-    if isinstance(item, _ToggleItem):
-        return f"  \u2190\u2192 or \u21b5 Enter  \u00b7  toggle {item.field}"
+    if isinstance(item, (_ToggleItem, _CycleItem)):
+        opts_str = " / ".join(item.options) if isinstance(item, _CycleItem) else "on / off"
+        return f"  \u2190\u2192 or \u21b5 Enter  \u00b7  {opts_str}"
     s  = _fmt_value(item.step)
     cs = _fmt_value(item.coarse)
     lo = _fmt_value(item.min_val)
@@ -466,6 +486,8 @@ class ConfigMenu:
                 self._save()
             elif isinstance(item, _ToggleItem):
                 self._toggle_bool(item)
+            elif isinstance(item, _CycleItem):
+                self._cycle_value(item, symbol)
             else:
                 self._adjust_value(symbol, modifiers)
             return True
@@ -477,6 +499,9 @@ class ConfigMenu:
                 return True
             if isinstance(item, _ToggleItem):
                 self._toggle_bool(item)
+                return True
+            if isinstance(item, _CycleItem):
+                self._cycle_value(item, Key.RIGHT)
                 return True
             return False
 
@@ -547,6 +572,21 @@ class ConfigMenu:
         cfg     = self._simulation.config
         cur_val = bool(getattr(cfg, item.field))
         new_cfg = dataclasses.replace(cfg, **{item.field: not cur_val})
+        self._simulation.apply_config(new_cfg)
+        self._dirty = True
+
+    def _cycle_value(self, item: "_CycleItem", symbol: int) -> None:
+        """Step a string enum field forward (RIGHT) or backward (LEFT)."""
+        cfg  = self._simulation.config
+        cur  = str(getattr(cfg, item.field))
+        opts = list(item.options)
+        try:
+            idx = opts.index(cur)
+        except ValueError:
+            idx = 0
+        delta   = 1 if symbol == Key.RIGHT else -1
+        new_idx = (idx + delta) % len(opts)
+        new_cfg = dataclasses.replace(cfg, **{item.field: opts[new_idx]})
         self._simulation.apply_config(new_cfg)
         self._dirty = True
 

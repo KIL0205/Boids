@@ -7,7 +7,7 @@ Design
 ------
 The world is divided into square cells of side ``cell_size``.  Each
 agent is bucketed into the cell that contains its position.  A radius
-query walks the (at most) 3×3 ring of overlapping cells and returns
+query walks the (at most) 3x3 ring of overlapping cells and returns
 every agent whose distance is within the requested radius.
 
 Choosing ``cell_size >= max_perception_radius`` guarantees that a
@@ -116,32 +116,50 @@ class SpatialHash:
 
         Uses toroidal distance so agents near a wrapped edge still see
         neighbours on the opposite side correctly.
+
+        The candidate-cell loop is inlined here (rather than calling
+        ``_candidate_cells``) to eliminate the method-call overhead and avoid
+        building an intermediate list.  A ``set`` tracks already-visited cell
+        keys so toroidal modular collisions never produce duplicate results;
+        the set overhead is negligible (<10 O(1) hash ops per query).
         """
         results: list["Boid"] = []
-        r2 = radius * radius
-        ax = float(agent.position[0])
-        ay = float(agent.position[1])
-        W  = self.world_width
-        H  = self.world_height
-        hw = self._half_w
-        hh = self._half_h
-
-        for key in self._candidate_cells(ax, ay, radius):
-            cell = self._cells.get(key)
-            if cell is None:
-                continue
-            for other in cell:
-                if other is agent:
+        r2  = radius * radius
+        ax  = float(agent.position[0])
+        ay  = float(agent.position[1])
+        W   = self.world_width
+        H   = self.world_height
+        hw  = self._half_w
+        hh  = self._half_h
+        cs  = self.cell_size
+        nc  = self._num_cols
+        nr  = self._num_rows
+        span    = max(1, math.ceil(radius / cs))
+        col_c   = int(ax // cs)
+        row_c   = int(ay // cs)
+        visited: set[tuple[int, int]] = set()
+        for dc in range(-span, span + 1):
+            col = (col_c + dc) % nc
+            for dr in range(-span, span + 1):
+                key = (col, (row_c + dr) % nr)
+                if key in visited:
                     continue
-                dx = ax - float(other.position[0])
-                dy = ay - float(other.position[1])
-                # Inline toroidal correction (avoids wrap_delta function-call overhead).
-                if dx > hw:   dx -= W
-                elif dx < -hw: dx += W
-                if dy > hh:   dy -= H
-                elif dy < -hh: dy += H
-                if dx * dx + dy * dy <= r2:
-                    results.append(other)
+                visited.add(key)
+                cell = self._cells.get(key)
+                if cell is None:
+                    continue
+                for other in cell:
+                    if other is agent:
+                        continue
+                    dx = ax - float(other.position[0])
+                    dy = ay - float(other.position[1])
+                    # Inline toroidal correction.
+                    if dx > hw:    dx -= W
+                    elif dx < -hw: dx += W
+                    if dy > hh:    dy -= H
+                    elif dy < -hh: dy += H
+                    if dx * dx + dy * dy <= r2:
+                        results.append(other)
         return results
 
     def query_position(
@@ -149,36 +167,48 @@ class SpatialHash:
     ) -> list["Boid"]:
         """Like ``query`` but searches from an arbitrary point (x, y)."""
         results: list["Boid"] = []
-        r2 = radius * radius
-        W  = self.world_width
-        H  = self.world_height
-        hw = self._half_w
-        hh = self._half_h
-        for key in self._candidate_cells(x, y, radius):
-            cell = self._cells.get(key)
-            if cell is None:
-                continue
-            for other in cell:
-                dx = x - float(other.position[0])
-                dy = y - float(other.position[1])
-                if dx > hw:   dx -= W
-                elif dx < -hw: dx += W
-                if dy > hh:   dy -= H
-                elif dy < -hh: dy += H
-                if dx * dx + dy * dy <= r2:
-                    results.append(other)
+        r2  = radius * radius
+        W   = self.world_width
+        H   = self.world_height
+        hw  = self._half_w
+        hh  = self._half_h
+        cs  = self.cell_size
+        nc  = self._num_cols
+        nr  = self._num_rows
+        span  = max(1, math.ceil(radius / cs))
+        col_c = int(x // cs)
+        row_c = int(y // cs)
+        visited: set[tuple[int, int]] = set()
+        for dc in range(-span, span + 1):
+            col = (col_c + dc) % nc
+            for dr in range(-span, span + 1):
+                key = (col, (row_c + dr) % nr)
+                if key in visited:
+                    continue
+                visited.add(key)
+                cell = self._cells.get(key)
+                if cell is None:
+                    continue
+                for other in cell:
+                    dx = x - float(other.position[0])
+                    dy = y - float(other.position[1])
+                    if dx > hw:    dx -= W
+                    elif dx < -hw: dx += W
+                    if dy > hh:    dy -= H
+                    elif dy < -hh: dy += H
+                    if dx * dx + dy * dy <= r2:
+                        results.append(other)
         return results
 
     # ── Private ───────────────────────────────────────────────────────
 
     def _candidate_cells(
         self, x: float, y: float, radius: float
-    ) -> list[CellKey]:
-        """Return the set of cell keys that could contain agents within *radius*.
+    ) -> set[CellKey]:
+        """Return the deduplicated set of cell keys near (x, y) within *radius*.
 
-        Spans a footprint of ceil(radius / cell_size) cells in each direction
-        beyond the cell that contains (x, y).  Wraps modularly so toroidal
-        boundary crossings are handled correctly.
+        Uses a set for O(1) deduplication; the previous list-based
+        implementation used an O(n) ``not in`` scan per key.
         """
         cs    = self.cell_size
         span  = max(1, math.ceil(radius / cs))
@@ -186,10 +216,9 @@ class SpatialHash:
         row_c = int(y // cs)
         nc    = self._num_cols
         nr    = self._num_rows
-        keys: list[CellKey] = []
+        keys: set[CellKey] = set()
         for dc in range(-span, span + 1):
+            col = (col_c + dc) % nc
             for dr in range(-span, span + 1):
-                key = ((col_c + dc) % nc, (row_c + dr) % nr)
-                if key not in keys:
-                    keys.append(key)
+                keys.add((col, (row_c + dr) % nr))
         return keys

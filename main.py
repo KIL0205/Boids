@@ -109,10 +109,14 @@ def main() -> None:
             window.set_fullscreen(not window.fullscreen)
         elif symbol == pyglet.window.key.V:
             import dataclasses
+            _SARDINE_MODES = ("white", "rainbow", "cool", "warm", "ocean", "sunset", "mono")
+            cur  = simulation.config.sardine_color_mode
+            idx  = _SARDINE_MODES.index(cur) if cur in _SARDINE_MODES else 0
+            next_mode = _SARDINE_MODES[(idx + 1) % len(_SARDINE_MODES)]
             simulation.apply_config(
                 dataclasses.replace(
                     simulation.config,
-                    use_velocity_coloring=not simulation.config.use_velocity_coloring,
+                    sardine_color_mode=next_mode,
                 )
             )
         # ── Dynamic population controls ───────────────────────────────

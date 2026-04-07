@@ -183,7 +183,12 @@ class Simulation:
         self._sailfish_grid.resize(W, H)
 
         # Clamp all positions into the new world bounds via toroidal wrap.
-        for agent in self.sardines + self.sailfish:
+        # Iterate the two lists separately to avoid creating a temporary
+        # merged list (sardines + sailfish) just for this loop.
+        for agent in self.sardines:
+            agent.position[0] %= W
+            agent.position[1] %= H
+        for agent in self.sailfish:
             agent.position[0] %= W
             agent.position[1] %= H
 

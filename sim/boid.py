@@ -67,6 +67,10 @@ class Boid:
         self.min_speed: float   = min_speed
         self.max_force: float   = max_force
         self._config: SimConfig = config
+        # Cached world dimensions — avoids re-reading config on every boundary
+        # check.  Updated by Simulation.resize() and Simulation.apply_config().
+        self._W: float = float(config.window_width)
+        self._H: float = float(config.window_height)
 
     # ── Public helpers ────────────────────────────────────────────────
 
@@ -148,22 +152,37 @@ class Boid:
     # ── Internals ─────────────────────────────────────────────────────
 
     def _clamp_speed(self) -> None:
-        """Clamp velocity magnitude to ``[min_speed, max_speed]``."""
-        self.velocity = limit(self.velocity, self.max_speed)
-        if self.min_speed > 0.0:
-            v   = self.velocity
-            spd = math.sqrt(v[0]*v[0] + v[1]*v[1])
-            if spd < self.min_speed:
-                # Preserve heading; fall back to +x if nearly stationary.
-                self.velocity = (
-                    normalize(self.velocity, fallback=np.array([1.0, 0.0]))
-                    * self.min_speed
-                )
+        """Clamp velocity magnitude to [min_speed, max_speed] in one pass.
+
+        Computes the magnitude once and adjusts in-place when needed,
+        avoiding both the double-sqrt that the previous limit() + min-speed
+        check required and the temporary numpy array that limit() allocated
+        whenever clamping was triggered.
+        """
+        v    = self.velocity
+        vx   = float(v[0])
+        vy   = float(v[1])
+        spd  = math.sqrt(vx * vx + vy * vy)
+        maxs = self.max_speed
+        mins = self.min_speed
+        if spd > maxs and spd > _EPS_F:
+            scale = maxs / spd
+            v[0]  = vx * scale
+            v[1]  = vy * scale
+        elif mins > 0.0 and spd < mins:
+            if spd < _EPS_F:
+                # Degenerate zero velocity — fall back to +x heading.
+                v[0] = mins
+                v[1] = 0.0
+            else:
+                scale = mins / spd
+                v[0]  = vx * scale
+                v[1]  = vy * scale
 
     def _apply_boundary(self) -> None:
         """Enforce world boundaries according to config.boundary."""
-        W = float(self._config.window_width)
-        H = float(self._config.window_height)
+        W = self._W
+        H = self._H
 
         if self._config.boundary == "wrap":
             wrap_position(self.position, W, H)
