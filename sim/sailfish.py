@@ -1,6 +1,6 @@
 """
-sailfish.py
-===========
+sim/sailfish.py
+===============
 ``Sailfish`` — a pursuit predator that steers toward the centre of mass
 of nearby sardines.
 
@@ -29,12 +29,12 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from boid import Boid
-from config import SimConfig
+from sim.boid import Boid
+from config.config import SimConfig
 from utils.vec2 import Vec2, wrap_delta
 
 if TYPE_CHECKING:
-    from spatial_hash import SpatialHash
+    from sim.spatial_hash import SpatialHash
 
 
 class Sailfish(Boid):

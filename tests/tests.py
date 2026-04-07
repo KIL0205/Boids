@@ -1,10 +1,12 @@
 """
-tests.py
-========
+tests/tests.py
+==============
 Unit and integration tests for the sardine/sailfish boid simulation.
 
 Run with:
-    python tests.py
+    python tests/tests.py
+        or
+    python -m pytest tests/
 
 No external test dependencies — uses the standard-library ``unittest`` module.
 """
@@ -13,7 +15,7 @@ import unittest
 
 import numpy as np
 
-from config import CONFIG, SimConfig
+from config.config import CONFIG, SimConfig
 from utils.vec2 import (
     distance,
     distance_sq,
@@ -23,9 +25,9 @@ from utils.vec2 import (
     wrap_delta,
     wrap_position,
 )
-from boid import Boid
-from spatial_hash import SpatialHash
-from simulation import Simulation
+from sim.boid import Boid
+from sim.spatial_hash import SpatialHash
+from sim.simulation import Simulation
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -405,8 +407,8 @@ class TestPhase2(unittest.TestCase):
 
     def test_sardine_flee_fires(self):
         """Sailfish inside radius_flee → non-zero acceleration on the sardine."""
-        from sardine import Sardine
-        from sailfish import Sailfish
+        from sim.sardine import Sardine
+        from sim.sailfish import Sailfish
 
         cfg = SimConfig(num_sardines=1, num_sailfish=1,
                         radius_flee=100.0, weight_flee=4.0,
@@ -425,7 +427,7 @@ class TestPhase2(unittest.TestCase):
 
     def test_sardine_no_flee_without_sailfish_grid(self):
         """sailfish_grid=None → no flee force even when a sailfish would be nearby."""
-        from sardine import Sardine
+        from sim.sardine import Sardine
 
         cfg = SimConfig(num_sardines=1, num_sailfish=0,
                         radius_flee=100.0, weight_flee=4.0,
@@ -450,8 +452,8 @@ class TestPhase2(unittest.TestCase):
         If cohesion fires:    accel.y > 0 (toward neighbour)
         If cohesion zeroed:   accel.y ≈ 0, accel.x < 0 (flee only)
         """
-        from sardine import Sardine
-        from sailfish import Sailfish
+        from sim.sardine import Sardine
+        from sim.sailfish import Sailfish
 
         cfg = SimConfig(num_sardines=2, num_sailfish=1,
                         weight_separation=0.0, weight_alignment=0.0,
@@ -478,8 +480,8 @@ class TestPhase2(unittest.TestCase):
 
         Same layout but sailfish is 200 px away (> radius_flee=100).
         """
-        from sardine import Sardine
-        from sailfish import Sailfish
+        from sim.sardine import Sardine
+        from sim.sailfish import Sailfish
 
         cfg = SimConfig(num_sardines=2, num_sailfish=1,
                         weight_separation=0.0, weight_alignment=0.0,

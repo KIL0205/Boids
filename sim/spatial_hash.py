@@ -1,6 +1,6 @@
 """
-spatial_hash.py
-===============
+sim/spatial_hash.py
+===================
 Uniform-grid spatial hash for O(1) average-case neighbour lookups.
 
 Design
@@ -33,7 +33,7 @@ import math
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from boid import Boid
+    from sim.boid import Boid
 
 # Cell key is a pair of ints (col, row)
 CellKey = tuple[int, int]
@@ -169,35 +169,27 @@ class SpatialHash:
                     results.append(other)
         return results
 
-    # ── Internals ─────────────────────────────────────────────────────
-
-    def _cell_key(self, x: float, y: float) -> CellKey:
-        col = int(x // self.cell_size) % self._num_cols
-        row = int(y // self.cell_size) % self._num_rows
-        return (col, row)
+    # ── Private ───────────────────────────────────────────────────────
 
     def _candidate_cells(
         self, x: float, y: float, radius: float
     ) -> list[CellKey]:
-        """Return all cell keys whose cells overlap a circle of *radius*.
+        """Return the set of cell keys that could contain agents within *radius*.
 
-        Keys are modulo-wrapped so queries that extend past a world edge
-        automatically include cells on the opposite side, making toroidal
-        edge-crossing neighbor lookups correct.  A set is used internally
-        to deduplicate keys that fold to the same cell (can happen when
-        the query radius is comparable to the world size).
+        Spans a footprint of ceil(radius / cell_size) cells in each direction
+        beyond the cell that contains (x, y).  Wraps modularly so toroidal
+        boundary crossings are handled correctly.
         """
-        cs      = self.cell_size
-        inv_cs  = 1.0 / cs
-        min_col = int(math.floor((x - radius) * inv_cs))
-        max_col = int(math.floor((x + radius) * inv_cs))
-        min_row = int(math.floor((y - radius) * inv_cs))
-        max_row = int(math.floor((y + radius) * inv_cs))
-        nc = self._num_cols
-        nr = self._num_rows
-        seen: set[CellKey] = set()
-        for col in range(min_col, max_col + 1):
-            col_w = col % nc
-            for row in range(min_row, max_row + 1):
-                seen.add((col_w, row % nr))
-        return list(seen)
+        cs    = self.cell_size
+        span  = max(1, math.ceil(radius / cs))
+        col_c = int(x // cs)
+        row_c = int(y // cs)
+        nc    = self._num_cols
+        nr    = self._num_rows
+        keys: list[CellKey] = []
+        for dc in range(-span, span + 1):
+            for dr in range(-span, span + 1):
+                key = ((col_c + dc) % nc, (row_c + dr) % nr)
+                if key not in keys:
+                    keys.append(key)
+        return keys

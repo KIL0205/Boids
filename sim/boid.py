@@ -1,6 +1,6 @@
 """
-boid.py
-=======
+sim/boid.py
+===========
 Base ``Boid`` class shared by all agents (sardines, sailfish, etc.).
 
 Responsibilities
@@ -22,7 +22,7 @@ import math
 import numpy as np
 import numpy.typing as npt
 
-from config import SimConfig
+from config.config import SimConfig
 from utils.vec2 import Vec2, limit, normalize, wrap_position
 
 # Epsilon used in _steer_apply_xy to guard against degenerate zero direction.

@@ -1788,3 +1788,176 @@ All active source files verified present and unignored:
 | IDE / editor | `.vscode/`, `.idea/`, Sublime Text, Vim/Emacs swap files |
 | Logs / runtime artifacts | `*.log`, `*.out`, `*.prof`, `*.pstats`, `*.tmp`, `*.bak` |
 | Project-specific | `boids_overrides.json`, `*_overrides*.json`, `*.snapshot`, `*.replay` |
+
+---
+
+## Section 24 — Workspace Reorganisation + Velocity-Based Fish Colouring
+
+### 24.1 Motivation
+
+Two independent improvements were requested together:
+
+1. **Visual**: Re-introduce fish colouring as a toggleable feature so schooling
+   fish show emergent colour patterns (velocity-based HSV mapping).
+2. **Structural**: Reorganise all modules into logical sub-packages to reduce
+   root-level clutter and make import relationships explicit.
+
+### 24.2 New Folder Structure
+
+```
+Boids/
+├── main.py                    ← entry point (imports updated)
+├── boids_overrides.json       ← runtime config overrides (gitignored)
+├── requirements.txt
+├── PROJECT_LOG.md
+├── .gitignore
+│
+├── config/                    ← NEW package
+│   ├── __init__.py            ← re-exports SimConfig, CONFIG, load_overrides, save_config, ConfigMenu
+│   ├── config.py              ← SimConfig frozen dataclass (+ use_velocity_coloring field)
+│   ├── config_io.py           ← save/load JSON overrides
+│   └── config_menu.py         ← runtime overlay UI (+ _ToggleItem, Vel coloring row)
+│
+├── sim/                       ← NEW package
+│   ├── __init__.py            ← re-exports Simulation, Boid, Sardine, Sailfish, SpatialHash
+│   ├── boid.py
+│   ├── sardine.py
+│   ├── sailfish.py
+│   ├── simulation.py
+│   └── spatial_hash.py
+│
+├── rendering/                 ← NEW package
+│   ├── __init__.py            ← re-exports Renderer
+│   └── renderer.py            ← Renderer + Hud + velocity-colour logic
+│
+├── tests/                     ← NEW package
+│   ├── __init__.py
+│   └── tests.py               ← all 53 tests (imports updated)
+│
+└── utils/                     ← existing package (unchanged)
+    ├── __init__.py
+    └── vec2.py
+```
+
+Old root-level files (`config.py`, `config_io.py`, `config_menu.py`, `boid.py`,
+`sardine.py`, `sailfish.py`, `simulation.py`, `spatial_hash.py`, `renderer.py`,
+`tests.py`) were deleted after the packages were verified.
+
+### 24.3 Velocity-Based Fish Colouring
+
+#### Feature overview
+
+When `SimConfig.use_velocity_coloring` is `True`, each sardine's triangle
+colour is recalculated every frame based on its current kinematics.
+
+| HSV channel | Source | Meaning |
+|---|---|---|
+| **Hue** | `speed / sardine_max_speed` → `[0.50, 0.80]` | Blue (slow) → Teal (fast) |
+| **Saturation** | `1 − clamp(smooth_turn_rate / (π/6))` → `[0.30, 0.95]` | Vivid (straight swim) → Desaturated (tight turn) |
+| **Value** | constant `0.95` | Always bright |
+
+Turn rate is estimated frame-to-frame from the change in heading angle, smoothed
+by a 0.85-weight exponential moving average to tame single-frame noise.
+
+**Emergent behaviour**: Fish that school together converge to similar hues
+because they share speed and heading.  Fleeing or scattered fish diverge
+visibly — fast-fleeing fish shift teal; tightly-turning fish grey out.
+
+#### New config field
+
+```python
+# config/config.py  (SimConfig frozen dataclass)
+use_velocity_coloring: bool = False
+```
+
+Persisted in `boids_overrides.json` like every other config field.
+
+#### Toggle paths
+
+| Method | Effect |
+|---|---|
+| **V key** (global shortcut, `main.py`) | Instant toggle, not saved |
+| **TAB → VISUAL → Vel coloring ← / → or Enter** (config menu) | Toggle via menu; save with S to persist |
+| **`boids_overrides.json`** | Set `"use_velocity_coloring": true` to start with it on |
+
+#### Implementation: `rendering/renderer.py`
+
+Key additions:
+
+- `_VelColorState` — per-fish dataclass storing `prev_angle`, `smooth_turn`,
+  `frames` — allocated in `Renderer.reset()` alongside the Triangle shapes.
+- `_sync_shapes_vel_color()` — replaces the flat `_sync_shapes()` call in the
+  hot path when velocity colouring is active.  Updates vertex positions **and**
+  `tri.color` in one pass.
+- `_hsv_to_rgb()` — pure-Python inline converter; avoids the `colorsys` import
+  for a negligible but consistent gain in the 60 fps loop.
+- `Renderer.draw()` — branches on `simulation.config.use_velocity_coloring`
+  each frame.  When the flag is toggled off, stored `_VelColorState.frames`
+  are reset to `0` so the first frame after re-enabling does not produce a
+  stale turn-rate jump.
+- HUD shows `[VEL COLOR]` indicator when the mode is active.
+
+### 24.4 Config Menu Changes (`config/config_menu.py`)
+
+New `_ToggleItem` row type added alongside the existing `_MenuItem`, `_GroupRow`,
+`_SaveRow`:
+
+```python
+@dataclasses.dataclass(frozen=True)
+class _ToggleItem:
+    label: str   # display label (≤ 16 chars)
+    field: str   # SimConfig boolean attribute name
+```
+
+New `_GroupRow("VISUAL")` section with one row:
+
+```
+_ToggleItem("Vel coloring", "use_velocity_coloring")
+```
+
+Key handling: LEFT / RIGHT and ENTER all toggle the boolean in-place via
+`_toggle_bool()` → `dataclasses.replace()` → `simulation.apply_config()`.
+The current ON/OFF state is shown in the right column of the menu.
+
+### 24.5 Import Path Migration
+
+| Old import | New import |
+|---|---|
+| `from config import SimConfig` | `from config.config import SimConfig` |
+| `from config_io import load_overrides` | `from config.config_io import load_overrides` |
+| `from config_menu import ConfigMenu` | `from config.config_menu import ConfigMenu` |
+| `from simulation import Simulation` | `from sim.simulation import Simulation` |
+| `from renderer import Renderer` | `from rendering.renderer import Renderer` |
+| `from boid import Boid` | `from sim.boid import Boid` |
+| `from sardine import Sardine` | `from sim.sardine import Sardine` |
+| `from sailfish import Sailfish` | `from sim.sailfish import Sailfish` |
+| `from spatial_hash import SpatialHash` | `from sim.spatial_hash import SpatialHash` |
+
+`utils/vec2.py` imports are unaffected (`from utils.vec2 import ...` was correct
+before and after).
+
+`config/config_io.py` OVERRIDE_FILE path changed from
+`pathlib.Path(__file__).parent / "boids_overrides.json"` to
+`pathlib.Path(__file__).parent.parent / "boids_overrides.json"` since
+`config_io.py` is now one directory deeper.
+
+### 24.6 Test Results
+
+```
+Ran 53 tests in 2.276s
+OK
+```
+
+All tests pass unchanged.  Run command:
+
+```bash
+python -m tests.tests
+```
+
+### 24.7 Run Commands (updated)
+
+| Task | Command |
+|---|---|
+| Run simulation | `python main.py` |
+| Run tests | `python -m tests.tests` |
+| Toggle velocity colouring | **V** key (instant) or TAB → VISUAL → Vel coloring |

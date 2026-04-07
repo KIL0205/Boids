@@ -1,6 +1,6 @@
 """
-config_menu.py
-==============
+config/config_menu.py
+=====================
 Translucent in-app config panel for the sardine/sailfish simulation.
 
 Toggle with TAB.  While the panel is visible:
@@ -16,29 +16,6 @@ The simulation continues to run while the menu is open.
 Draw the overlay by calling ``menu.draw()`` after ``Renderer.draw()``; it
 is a no-op when the menu is not visible so there is no branch needed at the
 call site.
-
-Integration (main.py sketch)
------------------------------
-    menu = ConfigMenu(window, simulation)
-
-    @window.event
-    def on_key_press(symbol, modifiers):
-        if menu.handle_key(symbol, modifiers):
-            return          # consumed — skip all other handlers
-        if symbol == key.TAB:
-            menu.toggle(); return
-        ...                 # existing handlers unchanged
-
-    @window.event
-    def on_draw():
-        window.clear()
-        renderer.draw(simulation, update_ms=_update_ms[0])
-        menu.draw()
-
-    @window.event
-    def on_resize(width, height):
-        ...
-        menu.on_resize(width, height)
 """
 
 from __future__ import annotations
@@ -52,10 +29,10 @@ import pyglet.shapes
 import pyglet.text
 import pyglet.window.key as Key
 
-from config_io import save_config
+from config.config_io import save_config
 
 if TYPE_CHECKING:
-    from simulation import Simulation
+    from sim.simulation import Simulation
 
 # ── Layout constants ──────────────────────────────────────────────────────
 
@@ -100,7 +77,7 @@ _SAVE_ERR_SECS:      float = 2.5
 
 @dataclasses.dataclass(frozen=True)
 class _MenuItem:
-    """Metadata for one editable config row."""
+    """Metadata for one editable numeric config row."""
 
     label:   str    # display label (max 16 chars for column alignment)
     field:   str    # SimConfig attribute name
@@ -108,6 +85,14 @@ class _MenuItem:
     coarse:  float  # Shift step (typically 10 × fine step)
     min_val: float  # inclusive lower bound
     max_val: float  # inclusive upper bound
+
+
+@dataclasses.dataclass(frozen=True)
+class _ToggleItem:
+    """A boolean config field toggled by ← / → or Enter."""
+
+    label: str   # display label (max 16 chars)
+    field: str   # SimConfig attribute name (must be bool)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -124,7 +109,7 @@ class _GroupRow:
 
 # ── Row definitions ───────────────────────────────────────────────────────
 
-_ROWS: list[_MenuItem | _SaveRow | _GroupRow] = [
+_ROWS: list[_MenuItem | _ToggleItem | _SaveRow | _GroupRow] = [
     _GroupRow("SARDINE FLOCKING"),
     _MenuItem("Sep weight",      "weight_separation",        0.1,   1.0,   0.0,   10.0),
     _MenuItem("Ali weight",      "weight_alignment",         0.1,   1.0,   0.0,   10.0),
@@ -145,6 +130,8 @@ _ROWS: list[_MenuItem | _SaveRow | _GroupRow] = [
     _MenuItem("Pursuit radius",  "radius_sailfish_awareness",5.0,  50.0,  50.0,  400.0),
     _MenuItem("Sailfish speed",  "sailfish_max_speed",      10.0,  50.0,  50.0,  600.0),
     _MenuItem("Sailfish force",  "sailfish_max_force",      10.0,  50.0,  10.0,  600.0),
+    _GroupRow("VISUAL"),
+    _ToggleItem("Vel coloring",  "use_velocity_coloring"),
     _SaveRow(),
 ]
 
@@ -155,6 +142,8 @@ _NUM_ROWS: int = len(_ROWS)
 
 def _fmt_value(val: object) -> str:
     """Format a SimConfig value for display in the menu."""
+    if isinstance(val, bool):
+        return "ON" if val else "OFF"
     if isinstance(val, float):
         # Show 2 decimal places for values < 1 so 0.04 isn't just "0.0".
         return f"{val:.2f}" if val < 1.0 else f"{val:.1f}"
@@ -162,7 +151,7 @@ def _fmt_value(val: object) -> str:
 
 
 def _row_text(
-    item: "_MenuItem | _SaveRow",
+    item: "_MenuItem | _ToggleItem | _SaveRow",
     cfg: object,
     is_selected: bool,
     save_state: str = "",
@@ -172,9 +161,6 @@ def _row_text(
     Format: ``▶ <label>      <value>`` (selected)
             ``  <label>      <value>`` (unselected)
     Columns: 2-char prefix · 16-char label · 8-char right-aligned value.
-
-    For a ``_SaveRow``: *save_state* drives the value column:
-    ``"saved"`` → green ✓,  ``"error"`` → red ✗,  ``""`` → idle hint.
 
     Note: ``_GroupRow`` items are rendered directly in ``_build``/``_refresh_rows``
     and are never passed to this function.
@@ -191,18 +177,14 @@ def _row_text(
     return f"{prefix}{item.label:<16}{val_str:>8}"
 
 
-def _footer_text(item: "_MenuItem | _SaveRow | _GroupRow") -> str:
-    """One-line hint for the currently selected row.
-
-    For ``_MenuItem``: shows the step size and valid range.
-    For ``_SaveRow``: shows the activation keys and destination file.
-    For ``_GroupRow``: returns an empty string (group headers are never
-    selectable so this case only occurs if called defensively).
-    """
+def _footer_text(item: "_MenuItem | _ToggleItem | _SaveRow | _GroupRow") -> str:
+    """One-line hint for the currently selected row."""
     if isinstance(item, _GroupRow):
         return ""
     if isinstance(item, _SaveRow):
         return "  \u21b5 Enter / \u2190\u2192  \u00b7  saves to boids_overrides.json"
+    if isinstance(item, _ToggleItem):
+        return f"  \u2190\u2192 or \u21b5 Enter  \u00b7  toggle {item.field}"
     s  = _fmt_value(item.step)
     cs = _fmt_value(item.coarse)
     lo = _fmt_value(item.min_val)
@@ -233,9 +215,9 @@ class ConfigMenu:
         self._selected:         int   = next(
             i for i, r in enumerate(_ROWS) if not isinstance(r, _GroupRow)
         )
-        self._dirty:            bool  = False  # True → _refresh_rows before next draw
-        self._save_until:       float = 0.0    # perf_counter deadline for "✓ saved" text
-        self._save_error_until: float = 0.0    # perf_counter deadline for "✗ error" text
+        self._dirty:            bool  = False
+        self._save_until:       float = 0.0
+        self._save_error_until: float = 0.0
 
         # Pyglet objects — None until _build() is called.
         self._bg:         pyglet.shapes.Rectangle | None = None
@@ -256,10 +238,7 @@ class ConfigMenu:
         return _HEADER_H + _PAD_V + _NUM_ROWS * _ROW_H + _PAD_V + _FOOTER_H
 
     def _panel_origin(self, win_h: int) -> tuple[int, int]:
-        """Bottom-left corner of the panel (pyglet y-up coordinates).
-
-        Clamped so the panel never sits below y=0 on small or fullscreen windows.
-        """
+        """Bottom-left corner of the panel (pyglet y-up coordinates)."""
         py = win_h - _PANEL_TOP - self._panel_h()
         return _PANEL_X, max(0, py)
 
@@ -314,7 +293,7 @@ class ConfigMenu:
         )
         self._ftr_bg.opacity = _C_FTR_ALPHA
 
-        # ── Cursor highlight bar + left-edge accent ─────────────────────────────
+        # ── Cursor highlight bar + left-edge accent ────────────────────
         self._cursor_bar = pyglet.shapes.Rectangle(
             px,
             self._row_bottom_y(py, self._selected),
@@ -355,7 +334,7 @@ class ConfigMenu:
             color=_C_FTR_TEXT,
         )
 
-        # ── Row labels ─────────────────────────────────────────────────
+        # ── Row labels ──────────────────────────────────────────────────
         cfg        = self._simulation.config
         save_state = self._save_row_state()
         self._row_labels = []
@@ -461,19 +440,7 @@ class ConfigMenu:
             self._dirty = True   # refresh values on open
 
     def handle_key(self, symbol: int, modifiers: int) -> bool:
-        """Process a key press; return True if consumed.
-
-        Call at the top of ``on_key_press`` before any other handlers.
-        When the menu is closed this always returns False so all existing
-        controls are unaffected.
-
-        Keys consumed when open:
-          ↑ / ↓      — move cursor (wraps)
-          ← / →      — adjust value (parameter rows) / activate Save (Save row)
-          Enter      — activate Save (Save row only; not consumed on other rows)
-          S          — save config (works from any row)
-          ESC / TAB  — close menu
-        """
+        """Process a key press; return True if consumed."""
         if not self.visible:
             return False
 
@@ -494,17 +461,24 @@ class ConfigMenu:
             return True
 
         if symbol in (Key.LEFT, Key.RIGHT):
-            if isinstance(_ROWS[self._selected], _SaveRow):
+            item = _ROWS[self._selected]
+            if isinstance(item, _SaveRow):
                 self._save()
+            elif isinstance(item, _ToggleItem):
+                self._toggle_bool(item)
             else:
                 self._adjust_value(symbol, modifiers)
             return True
 
         if symbol in (Key.ENTER, Key.RETURN):
-            if isinstance(_ROWS[self._selected], _SaveRow):
+            item = _ROWS[self._selected]
+            if isinstance(item, _SaveRow):
                 self._save()
                 return True
-            return False  # not consumed on parameter rows
+            if isinstance(item, _ToggleItem):
+                self._toggle_bool(item)
+                return True
+            return False
 
         if symbol == Key.S:
             self._save()
@@ -552,21 +526,27 @@ class ConfigMenu:
     # ── Private helpers ───────────────────────────────────────────────
 
     def _adjust_value(self, symbol: int, modifiers: int) -> None:
-        """Change the selected config field by one step and propagate live."""
+        """Change the selected numeric config field by one step and propagate live."""
         item  = _ROWS[self._selected]
         cfg   = self._simulation.config
         cur   = float(getattr(cfg, item.field))
         step  = item.coarse if (modifiers & Key.MOD_SHIFT) else item.step
         delta = step if symbol == Key.RIGHT else -step
 
-        # Clamp to declared range; round to 6 dp to prevent float accumulation
-        # error from accumulating over many repeated key presses.
         new_val = round(max(item.min_val, min(item.max_val, cur + delta)), 6)
 
         if new_val == cur:
             return   # already at boundary
 
         new_cfg = dataclasses.replace(cfg, **{item.field: new_val})
+        self._simulation.apply_config(new_cfg)
+        self._dirty = True
+
+    def _toggle_bool(self, item: "_ToggleItem") -> None:
+        """Flip a boolean config field and propagate live."""
+        cfg     = self._simulation.config
+        cur_val = bool(getattr(cfg, item.field))
+        new_cfg = dataclasses.replace(cfg, **{item.field: not cur_val})
         self._simulation.apply_config(new_cfg)
         self._dirty = True
 

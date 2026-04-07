@@ -20,11 +20,11 @@ import time
 
 import pyglet
 
-from config import SimConfig
-from config_io import load_overrides
-from config_menu import ConfigMenu
-from simulation import Simulation
-from renderer import Renderer
+from config.config import SimConfig
+from config.config_io import load_overrides
+from config.config_menu import ConfigMenu
+from sim.simulation import Simulation
+from rendering.renderer import Renderer
 
 
 def main() -> None:
@@ -107,6 +107,14 @@ def main() -> None:
         elif symbol == pyglet.window.key.F:
             # Toggle fullscreen; pyglet fires on_resize automatically afterwards.
             window.set_fullscreen(not window.fullscreen)
+        elif symbol == pyglet.window.key.V:
+            import dataclasses
+            simulation.apply_config(
+                dataclasses.replace(
+                    simulation.config,
+                    use_velocity_coloring=not simulation.config.use_velocity_coloring,
+                )
+            )
         # ── Dynamic population controls ───────────────────────────────
         # ↑/↓ : add/remove 50 sardines   ←/→ : remove/add 1 sailfish
         elif symbol == pyglet.window.key.UP:

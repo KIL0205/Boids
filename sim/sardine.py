@@ -1,6 +1,6 @@
 """
-sardine.py
-==========
+sim/sardine.py
+==============
 ``Sardine`` — a flocking boid that implements the three classic Reynolds rules:
 
 * **Separation** — maintain personal space; push away from too-close neighbours,
@@ -23,12 +23,12 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from boid import Boid
-from config import SimConfig
+from sim.boid import Boid
+from config.config import SimConfig
 from utils.vec2 import Vec2, wrap_delta
 
 if TYPE_CHECKING:
-    from spatial_hash import SpatialHash
+    from sim.spatial_hash import SpatialHash
 
 # Guard against zero-distance division (squared, in pixels²).
 _EPS2: float = 1e-18

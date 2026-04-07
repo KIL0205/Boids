@@ -1,6 +1,6 @@
 """
-config_io.py
-============
+config/config_io.py
+===================
 Config persistence for the sardine/sailfish boid simulation.
 
 Provides two public functions:
@@ -13,10 +13,10 @@ so it can be exercised in unit tests or future CLI tools without a display.
 
 Override file
 -------------
-``boids_overrides.json`` lives next to this file.  Format: a flat JSON
-object whose keys match ``SimConfig`` field names exactly.  Only fields
-you want to change need to be present — defaults for the rest come from
-the code.  The file is created on the first ``save_config()`` call.
+``boids_overrides.json`` lives next to ``main.py`` at the project root.
+Format: a flat JSON object whose keys match ``SimConfig`` field names exactly.
+Only fields you want to change need to be present — defaults for the rest
+come from the code.  The file is created on the first ``save_config()`` call.
 
 Startup contract
 ----------------
@@ -43,10 +43,10 @@ import pathlib
 import typing
 from typing import Any
 
-from config import SimConfig
+from config.config import SimConfig
 
-# Resolved once at import time so the location never varies at runtime.
-OVERRIDE_FILE = pathlib.Path(__file__).parent / "boids_overrides.json"
+# Override file lives at the project root (one level up from this package).
+OVERRIDE_FILE = pathlib.Path(__file__).parent.parent / "boids_overrides.json"
 
 # Fields that must be derived from the live window at startup.
 # Loading stale values from a previous session would break world geometry.

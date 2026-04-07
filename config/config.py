@@ -1,6 +1,6 @@
 """
-config.py
-=========
+config/config.py
+================
 Central configuration for the sardine/sailfish boid simulation.
 
 All tunable parameters live here as a frozen dataclass so they can be
@@ -46,10 +46,6 @@ class SimConfig:
 
     # ── Sardine perception radii ──────────────────────────────────────
     # Radii must satisfy: r_separation < r_alignment ≤ r_cohesion ≤ cell_size.
-    # At 600 boids and ≈1920×1080 world: avg spacing ≈ 59 px — similar to the
-    # original 300-boid 1400×700 tuning.  r_sep=40 → ~1.4 expected sep-neighbours.
-    # At smaller screens (e.g. 1280×800): ≈ 41 px avg spacing, r_sep fires more
-    # often — school spreads naturally; no instability observed.
     radius_separation: float = 40.0    # personal space (~3 body-lengths at size=6)
     radius_alignment: float  = 75.0    # match headings; broader window → tighter school
     radius_cohesion: float   = 80.0    # group attraction; must equal cell_size or less
@@ -68,6 +64,13 @@ class SimConfig:
     sardine_size: float = 6.0          # half-length of body triangle (px); body ≈ 18 px
     background_color: tuple[int, int, int, int] = (0, 20, 50, 255)   # deep-water blue
 
+    # ── Velocity-based coloring ───────────────────────────────────────
+    # When True, sardine color is derived each frame from the fish's linear
+    # speed and rotational (turn) rate, so schooling fish share similar hues
+    # while scattered or fleeing fish diverge in color.
+    # Toggle at runtime via the config menu or the 'V' key.
+    use_velocity_coloring: bool = False
+
     # ── Sailfish (Phase 2) ────────────────────────────────────────────
     num_sailfish: int = 8
 
@@ -79,30 +82,19 @@ class SimConfig:
     sailfish_max_force: float = 200.0   # steering budget (px/s²)
 
     # How far a sailfish can see sardines.
-    # 200 px > cell_size=80, so the spatial hash generates a 5×5 candidate
-    # ring — handled correctly by _candidate_cells (not limited to 3×3).
     radius_sailfish_awareness: float = 200.0  # px
 
     # Multiplier on the Reynolds pursuit steer force.
-    # 1.0 means the force is already at max_force; increase to make the
-    # sailfish feel more "driven", or decrease for a lazier glide.
     weight_pursuit: float = 1.5
 
     sailfish_size: float = 12.0                                        # 2× sardine; body ≈ 36 px
     sailfish_color: tuple[int, int, int, int] = (220, 80, 40, 255)    # orange-red predator
 
     # ── Sardine flee / predator-awareness ─────────────────────────────
-    # Contribution at 60 fps ≈ weight_flee × max_force / 60 ≈ 10 px/s —
-    # exceeds separation (5 px/s) so escape dominates crowding instincts.
-    # Cohesion is zeroed while fleeing so sub-groups can split and scatter;
-    # it resumes automatically once the sailfish exits radius_flee.
     radius_flee: float = 100.0      # px; sailfish within this trigger escape
     weight_flee: float = 10.0        # must exceed weight_separation (2.0)
 
-    # Cell size for the sailfish-only spatial hash.  For best performance,
-    # keep this >= max(radius_flee, radius_sailfish_awareness) so a single
-    # 3×3 ring lookup always suffices.  Larger radii work correctly but cost
-    # proportionally more per frame.
+    # Cell size for the sailfish-only spatial hash.
     sailfish_cell_size: float = 120.0
 
     # ── Overlay / HUD ─────────────────────────────────────────────────

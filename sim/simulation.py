@@ -1,6 +1,6 @@
 """
-simulation.py
-=============
+sim/simulation.py
+=================
 Simulation controller — owns all agents and advances them each frame.
 
 Responsibilities
@@ -20,11 +20,11 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from config import SimConfig
-from spatial_hash import SpatialHash
+from config.config import SimConfig
+from sim.spatial_hash import SpatialHash
 
 if TYPE_CHECKING:
-    from boid import Boid
+    from sim.boid import Boid
 
 
 class Simulation:
@@ -65,7 +65,7 @@ class Simulation:
 
     def _spawn_sardines(self) -> None:
         """Populate the world with Sardine boids at random positions and headings."""
-        from sardine import Sardine
+        from sim.sardine import Sardine
 
         rng = np.random.default_rng(42)  # fixed seed for reproducible spawning
         W   = float(self.config.window_width)
@@ -89,7 +89,7 @@ class Simulation:
 
     def _spawn_sailfish(self) -> None:
         """Populate the world with Sailfish predators at random positions."""
-        from sailfish import Sailfish
+        from sim.sailfish import Sailfish
 
         rng = np.random.default_rng(123)  # different seed from sardines (42)
         W   = float(self.config.window_width)
@@ -228,7 +228,7 @@ class Simulation:
         """
         if n <= 0:
             return
-        from sardine import Sardine
+        from sim.sardine import Sardine
         rng   = np.random.default_rng()
         W, H  = float(self.config.window_width), float(self.config.window_height)
         speed = self.config.sardine_min_speed
@@ -261,7 +261,7 @@ class Simulation:
         """Spawn *n* new sailfish at random positions."""
         if n <= 0:
             return
-        from sailfish import Sailfish
+        from sim.sailfish import Sailfish
         rng   = np.random.default_rng()
         W, H  = float(self.config.window_width), float(self.config.window_height)
         speed = self.config.sailfish_min_speed
@@ -348,9 +348,3 @@ class Simulation:
             "max_speed":      float(speeds.max()),
             "center_of_mass": positions.mean(axis=0),
         }
-
-    # ── Internals ─────────────────────────────────────────────────────
-
-    def _all_agents(self) -> list["Boid"]:
-        """Return all active agents (sardines + sailfish) — used by tests."""
-        return list(self.sardines) + list(self.sailfish)
