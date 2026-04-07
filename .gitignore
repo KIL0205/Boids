@@ -1,0 +1,159 @@
+# =============================================================================
+# .gitignore — Sardine Schooling & Sailfish Hunting Simulation
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------------------
+
+# Byte-compiled / optimised / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+MANIFEST
+
+# PyInstaller
+*.spec
+
+# pip
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# mypy / pyright / type-checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+pyrightconfig.json
+
+# Sphinx documentation
+docs/_build/
+
+
+# -----------------------------------------------------------------------------
+# Virtual environments
+# -----------------------------------------------------------------------------
+
+venv/
+.venv/
+env/
+.env/
+ENV/
+.ENV/
+env.bak/
+venv.bak/
+# pipenv
+Pipfile.lock
+# conda
+.conda/
+
+
+# -----------------------------------------------------------------------------
+# OS-specific — macOS
+# -----------------------------------------------------------------------------
+
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.AppleDouble
+.LSOverride
+Icon
+.DocumentRevisions-V100
+.fseventsd
+.TemporaryItems
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+
+# -----------------------------------------------------------------------------
+# IDE / editor
+# -----------------------------------------------------------------------------
+
+# VS Code — keep workspace settings out of git for a personal project.
+# If you want to share launch configs or extensions recommendations,
+# selectively un-ignore specific files (e.g. !.vscode/extensions.json).
+.vscode/
+
+# PyCharm / IntelliJ
+.idea/
+*.iml
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim / Emacs swap files
+*~
+*.swp
+*.swo
+.*.swp
+
+
+# -----------------------------------------------------------------------------
+# Logs and runtime artifacts
+# -----------------------------------------------------------------------------
+
+*.log
+*.out
+
+# Python profiling output (e.g. python -m cProfile -o out.prof main.py)
+*.prof
+*.pstats
+
+# Temporary / scratch files
+*.tmp
+*.bak
+*.orig
+
+
+# -----------------------------------------------------------------------------
+# Project-specific
+# -----------------------------------------------------------------------------
+
+# Runtime config override file.
+#
+# boids_overrides.json is written to disk by config_io.save_config() whenever
+# the user saves settings from the in-app config menu.  It stores the CURRENT
+# session's tuned values — including window_width/window_height which are
+# screen-resolution-specific — so it is inherently machine-local.
+#
+# The canonical defaults live in config.py (SimConfig frozen dataclass) and
+# are always tracked.  Contributors start from those defaults; any personal
+# tuning is deliberately kept out of version control.
+#
+# Module reference: config_io.py → OVERRIDE_FILE constant.
+boids_overrides.json
+
+# Any JSON files matching the override naming scheme that might be created
+# during experimentation (e.g. boids_overrides_backup.json).
+*_overrides*.json
+
+# Snapshot / replay files if added in a future phase
+*.snapshot
+*.replay
