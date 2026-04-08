@@ -66,6 +66,7 @@ class Sardine(Boid):
         config: SimConfig,
         grid: "SpatialHash",
         sailfish_grid: "SpatialHash | None" = None,
+        mouse_stimulus: "object | None" = None,
     ) -> None:
         super().__init__(
             x, y, vx, vy,
@@ -76,6 +77,9 @@ class Sardine(Boid):
         )
         self._grid: "SpatialHash" = grid
         self._sailfish_grid: "SpatialHash | None" = sailfish_grid
+        # Shared mutable mouse-predator state from Simulation (or None when
+        # sardines are created in isolation for unit tests).
+        self._mouse_stimulus: "object | None" = mouse_stimulus
 
         # Cache per-instance derived values — avoids repeated config lookups and
         # float() conversions in the per-frame _compute_forces hot path.
@@ -145,6 +149,28 @@ class Sardine(Boid):
                 if fvx * fvx + fvy * fvy > _EPS2:
                     self._steer_apply_xy(fvx, fvy, cfg.weight_flee)
                     fleeing = True
+
+        # ── 1b. Mouse predator flee ───────────────────────────────────────
+        # The same flee weight is used so a mouse press feels like a real
+        # predator.  flee_weight_mult (default 1.0) allows independent tuning.
+        # Skipped when mouse_stimulus is None (standalone / test sardines).
+        ms = self._mouse_stimulus
+        if ms is not None and ms.active and cfg.mouse_predator_enabled:
+            dx = px - ms.x
+            dy = py - ms.y
+            # Inline toroidal wrap — same pattern as the sailfish flee loop.
+            if dx > hw:    dx -= W
+            elif dx < -hw: dx += W
+            if dy > hh:    dy -= H
+            elif dy < -hh: dy += H
+            d2 = dx * dx + dy * dy
+            if 0.0 < d2 < ms.radius_sq:
+                inv_d = 1.0 / math.sqrt(d2)
+                self._steer_apply_xy(
+                    dx * inv_d, dy * inv_d,
+                    cfg.weight_flee * ms.flee_weight_mult,
+                )
+                fleeing = True
 
         # ── 2–4. Flocking rules ───────────────────────────────────────────
         sep_r2 = self._sep_r2

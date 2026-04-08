@@ -244,6 +244,24 @@ class SimConfig:
     # a single sailfish reaches threshold roughly every 30–60 seconds.
     sailfish_eat_threshold: int = 8
 
+    # Runtime toggles for sailfish ecology mechanics.
+    # When False the corresponding pass is skipped entirely each update(),
+    # regardless of the numeric time/threshold parameters.
+    sailfish_starvation_enabled:   bool = True
+    sailfish_reproduction_enabled: bool = True
+
+    # ── Mouse predator ────────────────────────────────────────────────
+    # When the left mouse button is held, sardines treat the cursor as an
+    # additional predator using their existing flee logic.
+    # Toggle with the config menu (MOUSE PREDATOR section).
+    mouse_predator_enabled: bool = True
+    # Radius (px) within which sardines react to the cursor.
+    # Defaults to the same value as radius_flee for a natural feel.
+    mouse_predator_radius: float = 100.0
+    # Multiplier applied to weight_flee for mouse-predator flee force.
+    # 1.0 = same intensity as a real sailfish; raise for stronger scatter.
+    mouse_predator_flee_weight: float = 1.0
+
     # ── Overlay / HUD ─────────────────────────────────────────────────
     # Toggle with the H key at runtime (via Renderer.toggle_hud()).
     show_hud: bool = True

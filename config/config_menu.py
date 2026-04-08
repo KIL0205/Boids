@@ -142,6 +142,10 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     _GroupRow("FLEE / AVOIDANCE"),
     _MenuItem("Flee weight",     "weight_flee",              0.5,   5.0,   0.0,   30.0),
     _MenuItem("Flee radius",     "radius_flee",              5.0,  50.0,  20.0,  300.0),
+    _GroupRow("MOUSE PREDATOR"),
+    _ToggleItem("Mouse predator", "mouse_predator_enabled"),
+    _MenuItem("Mouse radius",    "mouse_predator_radius",    5.0,  50.0,  20.0,  400.0),
+    _MenuItem("Mouse flee wt",   "mouse_predator_flee_weight", 0.1, 0.5,  0.0,    5.0),
     _GroupRow("SAILFISH"),
     _MenuItem("Pursuit wt",      "weight_pursuit",           0.1,   1.0,   0.0,   10.0),
     _MenuItem("Pursuit radius",  "radius_sailfish_awareness",5.0,  50.0,  50.0,  400.0),
@@ -163,6 +167,8 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     _MenuItem("Sailfish eat r",  "sailfish_eat_radius",      1.0,   5.0,  10.0,   80.0),
     _MenuItem("Sailfish starve", "sailfish_starvation_time", 5.0,  30.0,   0.0,  600.0),
     _MenuItem("Sailfish repro",  "sailfish_eat_threshold",   1.0,   5.0,   0.0,   20.0),
+    _ToggleItem("SF starvation", "sailfish_starvation_enabled"),
+    _ToggleItem("SF repro",      "sailfish_reproduction_enabled"),
     _GroupRow("ALGAE DRIFT"),
     # ─ Algae kinematics / flocking ─────────────────────────────────────
     # Live-effective via apply_config which propagates max_speed/max_force and

@@ -1382,14 +1382,15 @@ class TestSailfishEcology(unittest.TestCase):
         sf = Sailfish(100.0, 100.0, 0.0, 0.0, cfg, sim._grid)
         self.assertEqual(sf.food_counter, 0.0)
 
-    def test_sailfish_hunger_timer_initialized_from_config(self):
-        """Sailfish.hunger_timer is initialized from sailfish_initial_hunger_time."""
+    def test_sailfish_hunger_timer_starts_at_zero(self):
+        """New Sailfish always start with hunger_timer = 0 regardless of config."""
         from sim.sailfish import Sailfish
         cfg = SimConfig(num_sardines=0, num_sailfish=0, num_algae=0,
                         sailfish_initial_hunger_time=7.5)
         sim = Simulation(cfg)
         sf = Sailfish(100.0, 100.0, 0.0, 0.0, cfg, sim._grid)
-        self.assertAlmostEqual(sf.hunger_timer, 7.5, places=9)
+        self.assertAlmostEqual(sf.hunger_timer, 0.0, places=9,
+                               msg="hunger_timer must always start at 0")
 
     # ── Contact eating ─────────────────────────────────────────────────
 
@@ -1948,10 +1949,11 @@ class TestSailfishStarvation(unittest.TestCase):
 
     # ── Initial state ─────────────────────────────────────────────────
 
-    def test_sailfish_initial_hunger_time_set_from_config(self):
-        """Sailfish.hunger_timer is initialized from sailfish_initial_hunger_time config."""
-        sim, sf = _make_sailfish_starvation_sim(sailfish_initial_hunger=8.0)
-        self.assertAlmostEqual(sf.hunger_timer, 8.0, places=9)
+    def test_sailfish_hunger_timer_starts_at_zero(self):
+        """New sailfish always start with hunger_timer = 0, ignoring sailfish_initial_hunger_time."""
+        sim, sf = _make_sailfish_starvation_sim(sailfish_initial_hunger=3.0, starvation_time=5.0)
+        self.assertAlmostEqual(sf.hunger_timer, 0.0, places=9,
+                               msg="hunger_timer must always start at 0")
 
     def test_sailfish_hunger_timer_increments_each_frame(self):
         """Sailfish hunger_timer grows by dt each frame when it does not eat."""
@@ -1974,10 +1976,9 @@ class TestSailfishStarvation(unittest.TestCase):
 
     def test_sailfish_removed_when_starved(self):
         """Sailfish is removed once hunger_timer > starvation_time."""
-        # hunger_timer starts above threshold so any positive dt triggers starvation.
-        sim, sf = _make_sailfish_starvation_sim(
-            sailfish_initial_hunger=5.1, starvation_time=5.0
-        )
+        # hunger_timer is set above threshold so any positive dt triggers starvation.
+        sim, sf = _make_sailfish_starvation_sim(starvation_time=5.0)
+        sf.hunger_timer = 5.1   # manually place above threshold
         sim.update(1 / 60)
         self.assertNotIn(sf, sim.sailfish,
                          "Sailfish must be removed when hunger_timer exceeds starvation_time")
@@ -1995,18 +1996,16 @@ class TestSailfishStarvation(unittest.TestCase):
 
     def test_sailfish_starved_ids_populated(self):
         """_sailfish_died_ids contains the id() of each starved sailfish on death frame."""
-        sim, sf = _make_sailfish_starvation_sim(
-            sailfish_initial_hunger=5.1, starvation_time=5.0
-        )
+        sim, sf = _make_sailfish_starvation_sim(starvation_time=5.0)
+        sf.hunger_timer = 5.1   # manually place above threshold
         sim.update(1 / 60)
         self.assertIn(id(sf), sim._sailfish_died_ids,
                       "_sailfish_died_ids must contain the starved sailfish's id()")
 
     def test_sailfish_starved_ids_cleared_next_frame(self):
         """_sailfish_died_ids is cleared at the start of the following update()."""
-        sim, sf = _make_sailfish_starvation_sim(
-            sailfish_initial_hunger=5.1, starvation_time=5.0
-        )
+        sim, sf = _make_sailfish_starvation_sim(starvation_time=5.0)
+        sf.hunger_timer = 5.1   # manually place above threshold
         sim.update(1 / 60)   # sailfish starves; ids populated
         self.assertTrue(sim._sailfish_died_ids)
         sim.update(1 / 60)   # next frame: ids cleared
@@ -2017,9 +2016,8 @@ class TestSailfishStarvation(unittest.TestCase):
 
     def test_stats_sailfish_starvations_increments(self):
         """stats_sailfish_starvations increments for each sailfish starvation death."""
-        sim, sf = _make_sailfish_starvation_sim(
-            sailfish_initial_hunger=5.1, starvation_time=5.0
-        )
+        sim, sf = _make_sailfish_starvation_sim(starvation_time=5.0)
+        sf.hunger_timer = 5.1   # manually place above threshold
         sim.update(1 / 60)
         self.assertEqual(sim.stats_sailfish_starvations, 1)
 
@@ -2052,7 +2050,6 @@ class TestSailfishStarvation(unittest.TestCase):
         cfg = SimConfig(
             num_sardines=0, num_sailfish=0, num_algae=0,
             sailfish_eat_radius=20.0,
-            sailfish_initial_hunger_time=4.9,
             sailfish_starvation_time=5.0,
             sardine_starvation_time=0.0,
             sardine_eat_threshold=0,
@@ -2065,6 +2062,7 @@ class TestSailfishStarvation(unittest.TestCase):
         )
         sim = Simulation(cfg)
         sf = Sailfish(100.0, 100.0, 0.0, 0.0, cfg, sim._grid)
+        sf.hunger_timer = 4.9   # manually set near-starvation state
         sim.sailfish.append(sf)
         # Sardine within eat_radius so sailfish eats it on this frame.
         sardine = Sardine(105.0, 100.0, 0.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
@@ -2100,6 +2098,7 @@ class TestSailfishStarvation(unittest.TestCase):
         )
         sim2 = Simulation(cfg2)
         sf2 = Sailfish(100.0, 100.0, 0.0, 0.0, cfg2, sim2._grid)
+        sf2.hunger_timer = 5.1   # manually place above threshold (constructor clamps initial >= starvation)
         sim2.sailfish.append(sf2)
         sardine = Sardine(500.0, 500.0, 0.0, 0.0, cfg2, sim2._grid, sim2._sailfish_grid)
         sim2.sardines.append(sardine)
@@ -2624,10 +2623,10 @@ class TestConfigMenuEcosystem(unittest.TestCase):
 
         cfg = self._minimal_cfg(
             sailfish_starvation_time=10.0,
-            sailfish_initial_hunger_time=8.0,
         )
         sim = Simulation(cfg)
         sf = Sailfish(100.0, 100.0, 0.0, 0.0, cfg, sim._grid)
+        sf.hunger_timer = 8.0   # manually set above the new starvation threshold
         sim.sailfish.append(sf)
 
         # Lower starvation_time below the current hunger_timer.
@@ -2936,14 +2935,14 @@ class TestSailfishReproduction(unittest.TestCase):
         offspring = sim.sailfish[1]
         self.assertEqual(offspring.food_counter, 0.0)
 
-    def test_offspring_hunger_timer_initialized_from_config(self):
-        """Offspring hunger_timer is initialized from sailfish_initial_hunger_time."""
+    def test_offspring_hunger_timer_starts_at_zero(self):
+        """Reproduction offspring always start with hunger_timer = 0."""
         sim = _make_sailfish_reproduction_sim(threshold=1, initial_food=1.0)
         sim.update(1 / 60)
         offspring = sim.sailfish[1]
         self.assertAlmostEqual(
-            offspring.hunger_timer, sim.config.sailfish_initial_hunger_time, places=9,
-            msg="Newborn sailfish hunger_timer must equal sailfish_initial_hunger_time",
+            offspring.hunger_timer, 0.0, places=9,
+            msg="Newborn sailfish must start with hunger_timer = 0",
         )
 
     # ── _sailfish_born lifecycle ──────────────────────────────────────
@@ -3027,6 +3026,610 @@ class TestSailfishReproduction(unittest.TestCase):
             self.assertLess(px, W)
             self.assertGreaterEqual(py, 0.0)
             self.assertLess(py, H)
+
+
+# ── Sailfish hunger initialization ───────────────────────────────────────────
+
+class TestSailfishSpawnInit(unittest.TestCase):
+    """Verify that every sailfish spawn path always starts with hunger_timer = 0."""
+
+    def test_startup_sailfish_hunger_zero(self):
+        """Startup-created sailfish all begin with hunger_timer = 0."""
+        cfg = SimConfig(
+            num_sailfish=5,
+            sailfish_initial_hunger_time=40.0,  # ignored: hunger is always 0
+            sailfish_starvation_time=30.0,
+        )
+        sim = Simulation(cfg)
+        for sf in sim.sailfish:
+            self.assertAlmostEqual(
+                sf.hunger_timer, 0.0, places=9,
+                msg=f"startup sailfish hunger_timer must be 0.0, got {sf.hunger_timer}",
+            )
+
+    def test_manually_added_sailfish_hunger_zero(self):
+        """Sailfish added via add_sailfish() always start with hunger_timer = 0."""
+        cfg = SimConfig(
+            num_sailfish=0,
+            sailfish_initial_hunger_time=40.0,
+            sailfish_starvation_time=30.0,
+            sailfish_starvation_enabled=True,
+        )
+        sim = Simulation(cfg)
+        sim.add_sailfish(3)
+        for sf in sim.sailfish:
+            self.assertAlmostEqual(sf.hunger_timer, 0.0, places=9,
+                                   msg="add_sailfish() must produce sailfish with hunger_timer = 0")
+
+    def test_reproduction_offspring_hunger_zero(self):
+        """Reproduction-created sailfish always start with hunger_timer = 0."""
+        sim = _make_sailfish_reproduction_sim(threshold=1, initial_food=1.0)
+        sim.update(1 / 60)
+        self.assertEqual(len(sim.sailfish), 2, "Expected one offspring")
+        offspring = sim.sailfish[1]
+        self.assertAlmostEqual(offspring.hunger_timer, 0.0, places=9,
+                               msg="Reproduction offspring must start with hunger_timer = 0")
+
+    def test_hunger_zero_regardless_of_initial_hunger_time_config(self):
+        """hunger_timer is always 0 regardless of sailfish_initial_hunger_time in config."""
+        from sim.sailfish import Sailfish
+        for initial_hunger in (0.0, 10.0, 30.0, 50.0, 100.0):
+            cfg = SimConfig(
+                num_sardines=0, num_sailfish=0, num_algae=0,
+                sailfish_initial_hunger_time=initial_hunger,
+                sailfish_starvation_time=30.0,
+                sailfish_starvation_enabled=True,
+            )
+            sim = Simulation(cfg)
+            sf = Sailfish(100.0, 100.0, 0.0, 0.0, cfg, sim._grid)
+            self.assertAlmostEqual(
+                sf.hunger_timer, 0.0, places=9,
+                msg=f"hunger_timer must be 0 even when sailfish_initial_hunger_time={initial_hunger}",
+            )
+
+    def test_fresh_sailfish_survive_starvation_enabled(self):
+        """Fresh sailfish (hunger=0) do not die immediately even with starvation enabled."""
+        cfg = SimConfig(
+            num_sailfish=5,
+            sailfish_starvation_time=30.0,
+            sailfish_starvation_enabled=True,
+            sardine_starvation_time=0.0,
+            num_sardines=0,
+            num_algae=0,
+        )
+        sim = Simulation(cfg)
+        initial_count = len(sim.sailfish)
+        # Run 30 frames (0.5 s simulated) — well below the 30 s starvation time.
+        for _ in range(30):
+            sim.update(1 / 60)
+        self.assertEqual(
+            len(sim.sailfish), initial_count,
+            "Fresh sailfish must not die in the first 0.5 s with starvation_time=30 s",
+        )
+
+    def test_all_spawn_paths_consistent(self):
+        """Startup, add_sailfish(), and reproduction all produce hunger_timer = 0."""
+        cfg = SimConfig(
+            num_sailfish=2,
+            sailfish_initial_hunger_time=40.0,
+            sailfish_starvation_time=0.0,   # disable starvation so only reproduction is active
+            sailfish_eat_threshold=1,
+            sailfish_reproduction_enabled=True,
+            num_sardines=0, num_algae=0,
+            weight_separation=0.0, weight_alignment=0.0,
+            weight_cohesion=0.0, weight_noise=0.0,
+            weight_algae_separation=0.0, weight_algae_alignment=0.0,
+            weight_algae_cohesion=0.0, weight_algae_noise=0.0,
+            weight_pursuit=0.0, weight_flee=0.0,
+            sailfish_min_speed=0.0,
+        )
+        sim = Simulation(cfg)
+        # Path 1: startup
+        for sf in sim.sailfish:
+            self.assertAlmostEqual(sf.hunger_timer, 0.0, places=9,
+                                   msg="startup sailfish: hunger must be 0")
+        # Path 2: add_sailfish
+        sim.add_sailfish(2)
+        for sf in sim.sailfish[2:]:
+            self.assertAlmostEqual(sf.hunger_timer, 0.0, places=9,
+                                   msg="add_sailfish sailfish: hunger must be 0")
+        # Path 3: reproduction (food_counter >= threshold)
+        sim.sailfish[0].food_counter = 1.0
+        sim.update(1 / 60)
+        born = sim._sailfish_born
+        self.assertTrue(born, "Expected at least one reproduced offspring")
+        for sf in born:
+            self.assertAlmostEqual(sf.hunger_timer, 0.0, places=9,
+                                   msg="reproduced sailfish: hunger must be 0")
+
+
+# ── Sailfish ecology toggles ──────────────────────────────────────────────────
+
+class TestSailfishToggles(unittest.TestCase):
+    """Tests for sailfish_starvation_enabled and sailfish_reproduction_enabled toggles."""
+
+    # ── sailfish_starvation_enabled ───────────────────────────────────
+
+    def test_starvation_toggle_false_prevents_death(self):
+        """sailfish_starvation_enabled=False: sailfish with hunger above threshold survives."""
+        from sim.sailfish import Sailfish
+
+        cfg = SimConfig(
+            num_sardines=0, num_sailfish=0, num_algae=0,
+            sailfish_initial_hunger_time=0.0,
+            sailfish_starvation_time=5.0,
+            sailfish_starvation_enabled=False,  # disabled
+            sardine_starvation_time=0.0,
+            sardine_eat_threshold=0,
+            sailfish_min_speed=0.0,
+            weight_separation=0.0, weight_alignment=0.0,
+            weight_cohesion=0.0, weight_noise=0.0,
+            weight_algae_separation=0.0, weight_algae_alignment=0.0,
+            weight_algae_cohesion=0.0, weight_algae_noise=0.0,
+            weight_pursuit=0.0, weight_flee=0.0,
+        )
+        sim = Simulation(cfg)
+        sf = Sailfish(100.0, 100.0, 0.0, 0.0, cfg, sim._grid)
+        sf.hunger_timer = 5.1   # above threshold — would die if starvation were on
+        sim.sailfish.append(sf)
+        sim.update(1 / 60)
+        self.assertIn(sf, sim.sailfish,
+                      "Sailfish must survive when sailfish_starvation_enabled=False")
+        self.assertEqual(sim.stats_sailfish_starvations, 0)
+
+    def test_starvation_toggle_true_allows_death(self):
+        """sailfish_starvation_enabled=True (default): sailfish above threshold dies."""
+        from sim.sailfish import Sailfish
+
+        cfg = SimConfig(
+            num_sardines=0, num_sailfish=0, num_algae=0,
+            sailfish_initial_hunger_time=0.0,
+            sailfish_starvation_time=5.0,
+            sailfish_starvation_enabled=True,
+            sardine_starvation_time=0.0,
+            sardine_eat_threshold=0,
+            sailfish_min_speed=0.0,
+            weight_separation=0.0, weight_alignment=0.0,
+            weight_cohesion=0.0, weight_noise=0.0,
+            weight_algae_separation=0.0, weight_algae_alignment=0.0,
+            weight_algae_cohesion=0.0, weight_algae_noise=0.0,
+            weight_pursuit=0.0, weight_flee=0.0,
+        )
+        sim = Simulation(cfg)
+        sf = Sailfish(100.0, 100.0, 0.0, 0.0, cfg, sim._grid)
+        sf.hunger_timer = 5.1
+        sim.sailfish.append(sf)
+        sim.update(1 / 60)
+        self.assertNotIn(sf, sim.sailfish,
+                         "Sailfish must die when sailfish_starvation_enabled=True and hunger exceeds threshold")
+        self.assertEqual(sim.stats_sailfish_starvations, 1)
+
+    def test_starvation_toggle_via_apply_config(self):
+        """Toggle starvation off via apply_config() takes effect on the next update()."""
+        import dataclasses
+        from sim.sailfish import Sailfish
+
+        cfg = SimConfig(
+            num_sardines=0, num_sailfish=0, num_algae=0,
+            sailfish_initial_hunger_time=0.0,
+            sailfish_starvation_time=5.0,
+            sailfish_starvation_enabled=True,
+            sardine_starvation_time=0.0,
+            sardine_eat_threshold=0,
+            sailfish_min_speed=0.0,
+            weight_separation=0.0, weight_alignment=0.0,
+            weight_cohesion=0.0, weight_noise=0.0,
+            weight_algae_separation=0.0, weight_algae_alignment=0.0,
+            weight_algae_cohesion=0.0, weight_algae_noise=0.0,
+            weight_pursuit=0.0, weight_flee=0.0,
+        )
+        sim = Simulation(cfg)
+        sf = Sailfish(100.0, 100.0, 0.0, 0.0, cfg, sim._grid)
+        sf.hunger_timer = 5.1
+        sim.sailfish.append(sf)
+
+        sim.apply_config(dataclasses.replace(cfg, sailfish_starvation_enabled=False))
+        sim.update(1 / 60)
+        self.assertIn(sf, sim.sailfish,
+                      "apply_config(sailfish_starvation_enabled=False) must disable starvation immediately")
+
+    # ── sailfish_reproduction_enabled ────────────────────────────────
+
+    def test_reproduction_toggle_false_prevents_birth(self):
+        """sailfish_reproduction_enabled=False: no offspring even when food_counter >= threshold."""
+        from sim.sailfish import Sailfish
+
+        cfg = SimConfig(
+            num_sardines=0, num_sailfish=0, num_algae=0,
+            sailfish_eat_threshold=1,
+            sailfish_reproduction_enabled=False,  # disabled
+            sailfish_min_speed=0.0,
+            sailfish_starvation_time=0.0,
+            sailfish_initial_hunger_time=0.0,
+            sardine_starvation_time=0.0,
+            sardine_initial_hunger_time=0.0,
+            weight_separation=0.0, weight_alignment=0.0,
+            weight_cohesion=0.0, weight_noise=0.0,
+            weight_algae_separation=0.0, weight_algae_alignment=0.0,
+            weight_algae_cohesion=0.0, weight_algae_noise=0.0,
+            weight_pursuit=0.0, weight_flee=0.0,
+        )
+        sim = Simulation(cfg)
+        sf = Sailfish(700.0, 350.0, 10.0, 0.0, cfg, sim._grid)
+        sf.food_counter = 1.0   # at threshold, would reproduce if enabled
+        sim.sailfish.append(sf)
+        sim.update(1 / 60)
+        self.assertEqual(len(sim.sailfish), 1,
+                         "No offspring when sailfish_reproduction_enabled=False")
+        self.assertEqual(sim.stats_sailfish_births, 0)
+
+    def test_reproduction_toggle_true_allows_birth(self):
+        """sailfish_reproduction_enabled=True (default): offspring spawned at threshold."""
+        from sim.sailfish import Sailfish
+
+        cfg = SimConfig(
+            num_sardines=0, num_sailfish=0, num_algae=0,
+            sailfish_eat_threshold=1,
+            sailfish_reproduction_enabled=True,
+            sailfish_min_speed=0.0,
+            sailfish_starvation_time=0.0,
+            sailfish_initial_hunger_time=0.0,
+            sardine_starvation_time=0.0,
+            sardine_initial_hunger_time=0.0,
+            weight_separation=0.0, weight_alignment=0.0,
+            weight_cohesion=0.0, weight_noise=0.0,
+            weight_algae_separation=0.0, weight_algae_alignment=0.0,
+            weight_algae_cohesion=0.0, weight_algae_noise=0.0,
+            weight_pursuit=0.0, weight_flee=0.0,
+        )
+        sim = Simulation(cfg)
+        sf = Sailfish(700.0, 350.0, 10.0, 0.0, cfg, sim._grid)
+        sf.food_counter = 1.0
+        sim.sailfish.append(sf)
+        sim.update(1 / 60)
+        self.assertEqual(len(sim.sailfish), 2,
+                         "Offspring must spawn when sailfish_reproduction_enabled=True")
+        self.assertEqual(sim.stats_sailfish_births, 1)
+
+    def test_reproduction_toggle_via_apply_config(self):
+        """Toggle reproduction on via apply_config() takes effect on the next update()."""
+        import dataclasses
+        from sim.sailfish import Sailfish
+
+        cfg = SimConfig(
+            num_sardines=0, num_sailfish=0, num_algae=0,
+            sailfish_eat_threshold=1,
+            sailfish_reproduction_enabled=False,
+            sailfish_min_speed=0.0,
+            sailfish_starvation_time=0.0,
+            sailfish_initial_hunger_time=0.0,
+            sardine_starvation_time=0.0,
+            sardine_initial_hunger_time=0.0,
+            weight_separation=0.0, weight_alignment=0.0,
+            weight_cohesion=0.0, weight_noise=0.0,
+            weight_algae_separation=0.0, weight_algae_alignment=0.0,
+            weight_algae_cohesion=0.0, weight_algae_noise=0.0,
+            weight_pursuit=0.0, weight_flee=0.0,
+        )
+        sim = Simulation(cfg)
+        sf = Sailfish(700.0, 350.0, 10.0, 0.0, cfg, sim._grid)
+        sf.food_counter = 1.0
+        sim.sailfish.append(sf)
+
+        # Confirm disabled: no birth.
+        sim.update(1 / 60)
+        self.assertEqual(len(sim.sailfish), 1, "No birth while reproduction is disabled")
+
+        # Re-enable and prime food_counter again.
+        sim.apply_config(dataclasses.replace(sim.config, sailfish_reproduction_enabled=True))
+        sim.sailfish[0].food_counter = 1.0
+        sim.update(1 / 60)
+        self.assertEqual(len(sim.sailfish), 2,
+                         "apply_config(sailfish_reproduction_enabled=True) must enable reproduction immediately")
+
+    # ── Toggle persistence round-trip ────────────────────────────────
+
+    def test_toggle_persistence_round_trip(self):
+        """Both bool toggles survive a save_config / load_overrides round-trip."""
+        import dataclasses
+        import tempfile
+        import pathlib
+        import config.config_io as config_io
+
+        cfg = SimConfig(
+            num_sardines=0, num_sailfish=0, num_algae=0,
+            sailfish_starvation_enabled=False,
+            sailfish_reproduction_enabled=False,
+        )
+
+        orig_file = config_io.OVERRIDE_FILE
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                config_io.OVERRIDE_FILE = pathlib.Path(tmp) / "test_overrides.json"
+                config_io.save_config(cfg)
+                overrides = config_io.load_overrides()
+        finally:
+            config_io.OVERRIDE_FILE = orig_file
+
+        self.assertIn("sailfish_starvation_enabled", overrides)
+        self.assertIn("sailfish_reproduction_enabled", overrides)
+        self.assertIs(overrides["sailfish_starvation_enabled"], False,
+                      "sailfish_starvation_enabled=False must round-trip correctly")
+        self.assertIs(overrides["sailfish_reproduction_enabled"], False,
+                      "sailfish_reproduction_enabled=False must round-trip correctly")
+
+
+# ── Mouse predator ─────────────────────────────────────────────────────────
+
+class TestMousePredator(unittest.TestCase):
+    """Tests for the mouse-as-predator interaction feature."""
+
+    # ── Helper ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _make_isolated_sardine(
+        sardine_x: float,
+        sardine_y: float,
+        *,
+        mouse_predator_enabled: bool = True,
+        mouse_predator_radius: float = 100.0,
+        mouse_predator_flee_weight: float = 1.0,
+        weight_flee: float = 10.0,
+        weight_noise: float = 0.0,
+    ):
+        """Return (sim, sardine) with a single sardine and no other agents.
+
+        Forces and noise are disabled except flee, so the only velocity
+        change on update() would come from the mouse predator.
+        """
+        cfg = SimConfig(
+            num_sardines=0, num_sailfish=0, num_algae=0,
+            mouse_predator_enabled=mouse_predator_enabled,
+            mouse_predator_radius=mouse_predator_radius,
+            mouse_predator_flee_weight=mouse_predator_flee_weight,
+            weight_flee=weight_flee,
+            weight_noise=weight_noise,
+            weight_separation=0.0, weight_alignment=0.0, weight_cohesion=0.0,
+            weight_algae_separation=0.0, weight_algae_alignment=0.0,
+            weight_algae_cohesion=0.0, weight_algae_noise=0.0,
+            weight_pursuit=0.0,
+            sardine_starvation_time=0.0,
+            sardine_min_speed=0.0,
+        )
+        from sim.simulation import Simulation
+        from sim.sardine import Sardine
+        sim = Simulation(cfg)
+        sardine = Sardine(
+            sardine_x, sardine_y, 0.0, 0.0,
+            cfg, sim._grid, None, sim._mouse_stimulus,
+        )
+        sim.sardines.append(sardine)
+        return sim, sardine
+
+    # ── Stimulus object ──────────────────────────────────────────────
+
+    def test_simulation_has_mouse_stimulus(self):
+        """Simulation always creates a _mouse_stimulus object."""
+        sim = Simulation(SimConfig(num_sardines=0, num_sailfish=0, num_algae=0))
+        self.assertTrue(hasattr(sim, "_mouse_stimulus"),
+                        "Simulation must have a _mouse_stimulus attribute")
+
+    def test_mouse_stimulus_initially_inactive(self):
+        """Mouse predator starts inactive."""
+        sim = Simulation(SimConfig(num_sardines=0, num_sailfish=0, num_algae=0))
+        self.assertFalse(sim._mouse_stimulus.active,
+                         "Mouse predator must be inactive at startup")
+
+    def test_set_mouse_predator_activates(self):
+        """set_mouse_predator() marks the stimulus active and sets coordinates."""
+        sim = Simulation(SimConfig(num_sardines=0, num_sailfish=0, num_algae=0))
+        sim.set_mouse_predator(300.0, 400.0)
+        ms = sim._mouse_stimulus
+        self.assertTrue(ms.active)
+        self.assertAlmostEqual(ms.x, 300.0)
+        self.assertAlmostEqual(ms.y, 400.0)
+
+    def test_clear_mouse_predator_deactivates(self):
+        """clear_mouse_predator() marks the stimulus inactive."""
+        sim = Simulation(SimConfig(num_sardines=0, num_sailfish=0, num_algae=0))
+        sim.set_mouse_predator(100.0, 200.0)
+        sim.clear_mouse_predator()
+        self.assertFalse(sim._mouse_stimulus.active,
+                         "Mouse predator must become inactive after clear")
+
+    def test_radius_cached_in_stimulus(self):
+        """_mouse_stimulus.radius_sq matches mouse_predator_radius ** 2."""
+        cfg = SimConfig(num_sardines=0, num_sailfish=0, num_algae=0,
+                        mouse_predator_radius=150.0)
+        sim = Simulation(cfg)
+        ms = sim._mouse_stimulus
+        self.assertAlmostEqual(ms.radius, 150.0)
+        self.assertAlmostEqual(ms.radius_sq, 150.0 ** 2)
+
+    # ── Sardine response ─────────────────────────────────────────────
+
+    def test_sardine_flees_active_mouse_predator(self):
+        """A sardine south of the mouse cursor (Y below) flees southward."""
+        # Sardine at (400, 300); mouse at (400, 380) — 80 px north.
+        # After one update the sardine must have a southward velocity (vy < 0).
+        sim, sardine = self._make_isolated_sardine(400.0, 300.0)
+        sim.set_mouse_predator(400.0, 380.0)
+        sim.update(1 / 60)
+        vy = float(sardine.velocity[1])
+        self.assertLess(vy, 0.0,
+                        f"Sardine south of mouse must flee southward; vy={vy:.3f}")
+
+    def test_sardine_flees_left_of_mouse(self):
+        """A sardine left of the mouse cursor flees leftward (vx < 0)."""
+        # Sardine at (300, 350); mouse at (380, 350) — 80 px to the right.
+        sim, sardine = self._make_isolated_sardine(300.0, 350.0)
+        sim.set_mouse_predator(380.0, 350.0)
+        sim.update(1 / 60)
+        vx = float(sardine.velocity[0])
+        self.assertLess(vx, 0.0,
+                        f"Sardine left of mouse must flee leftward; vx={vx:.3f}")
+
+    def test_sardine_ignores_inactive_mouse(self):
+        """Sardine does not flee when mouse predator is inactive."""
+        sim, sardine = self._make_isolated_sardine(400.0, 300.0)
+        # Do not activate mouse predator.
+        sim.update(1 / 60)
+        vx = float(sardine.velocity[0])
+        vy = float(sardine.velocity[1])
+        # With all forces including noise disabled, velocity stays at (0, 0).
+        # min_speed=0 so clamping won't introduce motion either.
+        self.assertAlmostEqual(vx, 0.0, places=6)
+        self.assertAlmostEqual(vy, 0.0, places=6)
+
+    def test_sardine_ignores_mouse_beyond_radius(self):
+        """Sardine does not flee when mouse is outside mouse_predator_radius."""
+        # radius=100; mouse 200 px away.
+        sim, sardine = self._make_isolated_sardine(
+            400.0, 300.0, mouse_predator_radius=100.0
+        )
+        sim.set_mouse_predator(600.0, 300.0)  # 200 px east — outside radius
+        sim.update(1 / 60)
+        vx = float(sardine.velocity[0])
+        vy = float(sardine.velocity[1])
+        self.assertAlmostEqual(vx, 0.0, places=6)
+        self.assertAlmostEqual(vy, 0.0, places=6)
+
+    def test_mouse_predator_disabled_config_suppresses_flee(self):
+        """When mouse_predator_enabled=False sardines do not flee the cursor."""
+        sim, sardine = self._make_isolated_sardine(
+            400.0, 300.0, mouse_predator_enabled=False
+        )
+        sim.set_mouse_predator(400.0, 380.0)  # 80 px north, inside radius
+        sim.update(1 / 60)
+        vx = float(sardine.velocity[0])
+        vy = float(sardine.velocity[1])
+        self.assertAlmostEqual(vx, 0.0, places=6)
+        self.assertAlmostEqual(vy, 0.0, places=6)
+
+    def test_releasing_mouse_stops_effect(self):
+        """Clearing the mouse predator mid-run stops the flee force."""
+        sim, sardine = self._make_isolated_sardine(400.0, 300.0)
+        sim.set_mouse_predator(400.0, 380.0)
+        sim.update(1 / 60)
+        # Confirm it was fleeing.
+        self.assertLess(float(sardine.velocity[1]), 0.0)
+        # Zero out velocity to isolate the next frame.
+        sardine.velocity[0] = 0.0
+        sardine.velocity[1] = 0.0
+        # Release mouse.
+        sim.clear_mouse_predator()
+        sim.update(1 / 60)
+        # With no forces and noise=0 velocity should not change.
+        self.assertAlmostEqual(float(sardine.velocity[0]), 0.0, places=6)
+        self.assertAlmostEqual(float(sardine.velocity[1]), 0.0, places=6)
+
+    # ── Config propagation ───────────────────────────────────────────
+
+    def test_apply_config_updates_radius(self):
+        """apply_config() propagates mouse_predator_radius to _mouse_stimulus."""
+        import dataclasses
+        cfg = SimConfig(num_sardines=0, num_sailfish=0, num_algae=0,
+                        mouse_predator_radius=80.0)
+        sim = Simulation(cfg)
+        new_cfg = dataclasses.replace(cfg, mouse_predator_radius=200.0)
+        sim.apply_config(new_cfg)
+        ms = sim._mouse_stimulus
+        self.assertAlmostEqual(ms.radius, 200.0)
+        self.assertAlmostEqual(ms.radius_sq, 200.0 ** 2)
+
+    def test_apply_config_updates_flee_weight_mult(self):
+        """apply_config() propagates mouse_predator_flee_weight to _mouse_stimulus."""
+        import dataclasses
+        cfg = SimConfig(num_sardines=0, num_sailfish=0, num_algae=0,
+                        mouse_predator_flee_weight=1.0)
+        sim = Simulation(cfg)
+        new_cfg = dataclasses.replace(cfg, mouse_predator_flee_weight=2.5)
+        sim.apply_config(new_cfg)
+        self.assertAlmostEqual(sim._mouse_stimulus.flee_weight_mult, 2.5)
+
+    def test_config_radius_change_affects_detection(self):
+        """Reducing radius below the mouse distance stops the flee effect."""
+        import dataclasses
+        # Sardine 150 px south of mouse.  Default radius=200 → should flee.
+        sim, sardine = self._make_isolated_sardine(
+            400.0, 200.0, mouse_predator_radius=200.0
+        )
+        sim.set_mouse_predator(400.0, 350.0)  # 150 px north
+        sim.update(1 / 60)
+        self.assertLess(float(sardine.velocity[1]), 0.0, "Should flee at radius=200")
+        # Now shrink radius to 100 px (below 150 px distance).
+        sardine.velocity[0] = 0.0
+        sardine.velocity[1] = 0.0
+        sim.apply_config(dataclasses.replace(sim.config, mouse_predator_radius=100.0))
+        sim.update(1 / 60)
+        self.assertAlmostEqual(float(sardine.velocity[1]), 0.0, places=6,
+                               msg="Should not flee after radius shrinks below distance")
+
+    # ── Offspring and coexistence ────────────────────────────────────
+
+    def test_reproduced_sardine_gets_mouse_stimulus(self):
+        """Sardine offspring created by reproduction share the mouse stimulus."""
+        cfg = SimConfig(
+            num_sardines=0, num_sailfish=0, num_algae=0,
+            sardine_eat_threshold=1,
+            mouse_predator_enabled=True,
+            mouse_predator_radius=100.0,
+            weight_separation=0.0, weight_alignment=0.0,
+            weight_cohesion=0.0, weight_noise=0.0,
+            weight_algae_separation=0.0, weight_algae_alignment=0.0,
+            weight_algae_cohesion=0.0, weight_algae_noise=0.0,
+            weight_pursuit=0.0, weight_flee=10.0,
+            sardine_starvation_time=0.0, sardine_min_speed=0.0,
+        )
+        from sim.simulation import Simulation
+        from sim.sardine import Sardine
+        sim = Simulation(cfg)
+        # Parent sardine already fed enough to reproduce.
+        parent = Sardine(400.0, 300.0, 10.0, 0.0, cfg, sim._grid,
+                         None, sim._mouse_stimulus)
+        parent.food_counter = 1.0
+        sim.sardines.append(parent)
+        sim.update(1 / 60)
+        self.assertEqual(len(sim.sardines), 2, "Expected one offspring")
+        offspring = sim.sardines[1]
+        self.assertIs(offspring._mouse_stimulus, sim._mouse_stimulus,
+                      "Offspring must share the simulation's mouse stimulus")
+
+    def test_sailfish_flee_coexists_with_mouse_predator(self):
+        """Sailfish predator flee still works when mouse predator is also active."""
+        from sim.sailfish import Sailfish
+        from sim.sardine import Sardine
+        cfg = SimConfig(
+            num_sardines=0, num_sailfish=0, num_algae=0,
+            radius_flee=200.0, weight_flee=10.0,
+            mouse_predator_enabled=True,
+            mouse_predator_radius=100.0,
+            mouse_predator_flee_weight=1.0,
+            weight_separation=0.0, weight_alignment=0.0,
+            weight_cohesion=0.0, weight_noise=0.0,
+            weight_algae_separation=0.0, weight_algae_alignment=0.0,
+            weight_algae_cohesion=0.0, weight_algae_noise=0.0,
+            weight_pursuit=0.0,
+            sardine_starvation_time=0.0,
+            sailfish_starvation_time=0.0,
+            sardine_min_speed=0.0,
+            sailfish_min_speed=0.0,
+        )
+        sim = Simulation(cfg)
+        # Place sardine at (400, 300).  Sailfish 150 px to the right.
+        sardine = Sardine(400.0, 300.0, 0.0, 0.0, cfg, sim._grid,
+                          sim._sailfish_grid, sim._mouse_stimulus)
+        sim.sardines.append(sardine)
+        sailfish = Sailfish(550.0, 300.0, 0.0, 0.0, cfg, sim._grid)
+        sim.sailfish.append(sailfish)
+        # Mouse is 80 px above — should also trigger flee.
+        sim.set_mouse_predator(400.0, 380.0)
+        sim.update(1 / 60)
+        # Sardine should flee leftward (from sailfish) and/or southward (from mouse).
+        vx = float(sardine.velocity[0])
+        vy = float(sardine.velocity[1])
+        self.assertTrue(vx < 0.0 or vy < 0.0,
+                        f"Sardine should flee from sailfish or mouse; vx={vx:.3f} vy={vy:.3f}")
 
 
 if __name__ == "__main__":

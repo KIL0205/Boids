@@ -5,12 +5,24 @@
 
 ---
 
+## Log Maintenance
+- Cleaned and pruned outdated content (April 2026)
+- Archived Phase 8 ecosystem plan and verbose stage notes to ARCHIVE.md
+- Removed `[Phase X]` annotations — all described features are current
+- Fixed stale test count (169 → 185)
+- Ensured log reflects current system only
+- Added sailfish starvation/reproduction toggles (April 2026)
+- Fixed sailfish spawn-init: hunger_timer now always 0 on every spawn path; removed clamping logic; tests updated (April 2026)
+- Added mouse-as-predator interaction: left-click/drag scatters sardines; visual indicator; config menu exposed; 16 new tests (April 2026)
+
+---
+
 ## 1. Project Overview
 
 A 2D real-time Python simulation of sardine schooling and sailfish predation.
 
 - **Runtime**: `python main.py` — resizable window at screen resolution, 60 fps target.
-- **Tests**: `python -m tests.tests` — 185 tests, ~1.5 s.
+- **Tests**: `python -m tests.tests` — 214 tests, ~1.25 s.
 
 ### Current capabilities
 - Sardines flock using Reynolds separation / alignment / cohesion + small noise term.
@@ -26,6 +38,7 @@ A 2D real-time Python simulation of sardine schooling and sailfish predation.
 - Velocity-based fish colouring: 7 sardine palette modes, 5 sailfish colour modes.
 - Dynamic population controls from keyboard.
 - HUD overlay (FPS, frame timing, per-species counts, totals, full ecosystem event stats, average sardine/sailfish hunger).
+- **Mouse predator**: holding the left mouse button causes nearby sardines to flee the cursor — same flee mechanics as a real sailfish. A faint red radius indicator appears at the cursor. Configurable toggle, radius, and flee-weight multiplier.
 
 ### Tech stack
 - Python 3.13+, pyglet ≥ 2.1, numpy 2.x
@@ -53,10 +66,10 @@ Boids/
 ├── sim/
 │   ├── __init__.py           # Re-exports Simulation, Boid, Sardine, Sailfish, SpatialHash
 │   ├── boid.py               # Base Boid: kinematics, Euler integration, _compute_forces() hook
-│   ├── sardine.py            # Sardine(Boid): flocking + flee [+ food_counter/hunger_timer in Phase 8]
-│   ├── sailfish.py           # Sailfish(Boid): COM pursuit [+ food_counter/hunger_timer in Phase 8]
-│   ├── algae.py              # [Phase 8] Algae(Boid): alignment-dominant drift; no predator awareness
-│   ├── simulation.py         # Simulation: owns agents + grids, drives update loop [+ ecology pass in Phase 8]
+│   ├── sardine.py            # Sardine(Boid): flocking + flee; food_counter/hunger_timer
+│   ├── sailfish.py           # Sailfish(Boid): COM pursuit; food_counter/hunger_timer
+│   ├── algae.py              # Algae(Boid): alignment-dominant drift; no predator awareness
+│   ├── simulation.py         # Simulation: owns agents + grids, drives update loop; ecology pass
 │   └── spatial_hash.py       # Uniform-grid spatial hash — O(1) neighbour lookup
 │
 ├── rendering/
@@ -78,12 +91,12 @@ Boids/
 |---|---|---|
 | `SimConfig` | `config/config.py` | Frozen dataclass — single source of truth for all params |
 | `Boid` | `sim/boid.py` | Position/velocity/acceleration; `update(dt)`; `_steer_apply_xy()`; speed clamp; boundary |
-| `Sardine(Boid)` | `sim/sardine.py` | Flocking (sep/ali/coh/noise) + flee; holds sardine + sailfish grid refs; [Phase 8] `food_counter`, `hunger_timer` |
-| `Sailfish(Boid)` | `sim/sailfish.py` | COM pursuit; holds sardine grid ref; coasts when no sardines visible; [Phase 8] `food_counter`, `hunger_timer` |
-| `Algae(Boid)` | `sim/algae.py` | *[Phase 8]* Alignment-dominant drift entity; holds algae grid ref; no predator awareness |
+| `Sardine(Boid)` | `sim/sardine.py` | Flocking (sep/ali/coh/noise) + flee; holds sardine + sailfish grid refs; `food_counter`, `hunger_timer` |
+| `Sailfish(Boid)` | `sim/sailfish.py` | COM pursuit; holds sardine grid ref; coasts when no sardines visible; `food_counter`, `hunger_timer` |
+| `Algae(Boid)` | `sim/algae.py` | Alignment-dominant drift entity; holds algae grid ref; no predator awareness |
 | `SpatialHash` | `sim/spatial_hash.py` | `insert()`, `query()`, `clear()`, `resize()` with toroidal cell-key wrapping |
-| `Simulation` | `sim/simulation.py` | Spawns agents; owns three grids; `update(dt)`, `resize()`, `apply_config()`; [Phase 8] ecology pass |
-| `Renderer` | `rendering/renderer.py` | `reset()`, `draw()`, `on_resize()`, `toggle_hud()`; velocity-colour logic; [Phase 8] algae shapes |
+| `Simulation` | `sim/simulation.py` | Spawns agents; owns three grids; `update(dt)`, `resize()`, `apply_config()`; ecology pass |
+| `Renderer` | `rendering/renderer.py` | `reset()`, `draw()`, `on_resize()`, `toggle_hud()`; velocity-colour logic; algae/sardine/sailfish shapes |
 | `ConfigMenu` | `config/config_menu.py` | `toggle()`, `handle_key()`, `draw()`, `on_resize()` |
 
 ### Data flow (one frame)
@@ -139,8 +152,7 @@ pyglet on_draw → Renderer.draw(simulation)
 ### Runtime config menu
 - TAB toggles the overlay.  Simulation keeps running while open.
 - Modal guard: `handle_key()` returns `True` when open — population controls cannot fire.
-- **40 rows** across 8 group sections + 1 Save row.  Panel height is fixed at 418 px (`_VISIBLE_ROWS = 16`); rows scroll automatically as you navigate with ↑/↓.  Scroll indicators (▲/▼) appear in the footer strip when off-screen rows exist.
-- Every value change immediately calls `Simulation.apply_config()` — effect is visible in the next frame.
+- **42 rows** across 8 group sections + 1 Save row.  Panel height is fixed at 418 px (`_VISIBLE_ROWS = 16`); rows scroll automatically as you navigate with ↑/↓.  Scroll indicators (▲/▼) appear in the footer strip when off-screen rows exist.
 - **Int field safety**: `sardine_eat_threshold` and `algae_max_count` are int fields in `SimConfig`.  `_adjust_value()` detects `isinstance(cur_typed, int)` and casts back to `int` before `dataclasses.replace()` to avoid a `TypeError` on the frozen dataclass.
 - `S` key (from any row) or Enter/←/→ on the Save row writes `boids_overrides.json`.
 - Resize-safe: `_build(w, h)` recreates all pyglet objects; panel y clamped to `max(0, py)`.
@@ -228,6 +240,13 @@ ECOSYSTEM
   Sardine starve     ←→ 1 / Shift 10      [0–300]  (s; 0 = disabled)
   Sailfish eat r     ←→ 1 / Shift 5       [10–80]  (sailfish↔sardine contact radius px)
   Sailfish starve    ←→ 5 / Shift 30      [0–600]  (s; 0 = disabled)
+  Sailfish repro     ←→ 1 / Shift 5       [0–20]   (int; sardines eaten before sailfish splits)
+  SF starvation      ←→ / Enter           ON/OFF   (bool; disables starvation pass when OFF)
+  SF repro           ←→ / Enter           ON/OFF   (bool; disables reproduction pass when OFF)
+MOUSE PREDATOR
+  Mouse predator     ←→ / Enter           ON/OFF   (bool; enables/disables mouse-as-predator feature)
+  Mouse radius       ←→ 5 / Shift 50      [20–400] (px; sardine detection radius around cursor)
+  Mouse flee wt      ←→ 0.1 / Shift 0.5  [0–5]    (multiplier on weight_flee; 1.0 = same as sailfish)
 ALGAE DRIFT
   Algae speed        ←→ 1 / Shift 5       [1–100]  (propagated immediately via apply_config)
   Algae align wt     ←→ 0.1 / Shift 0.5  [0–5]
@@ -242,9 +261,16 @@ VISUAL
   Save to file       ←→ / Enter / S
 ```
 
+**Mouse predator** (left-click/drag to activate):
+- Hold left mouse button → sardines within `mouse_predator_radius` flee the cursor
+- Release → effect stops immediately
+- A faint translucent red circle shows the danger radius while active
+- Toggle, radius, and flee-weight tunable via config menu (MOUSE PREDATOR section)
+
 **Note**: `sardine_initial_hunger_time` and `sailfish_initial_hunger_time` are intentionally
-omitted from the menu.  They only affect the `hunger_timer` set on construction and have no
-effect on existing agents at runtime — changing them live would be misleading.
+omitted from the menu.  `sailfish_initial_hunger_time` is kept only for JSON backwards-compatibility
+— the `Sailfish` constructor always sets `hunger_timer = 0.0` regardless of its value.
+`sardine_initial_hunger_time` still controls the sardine initial hunger on construction.
 
 ### Dynamic window resize
 - Dragging the window or pressing F fires `on_resize(w, h)`.
@@ -316,7 +342,13 @@ All defaults live in `config/config.py` → `SimConfig` frozen dataclass. This i
 | `algae_cell_size` | 60.0 | px; > both radii for clean 3×3 ring lookup |
 | `algae_eat_radius` | 14.0 | px; sardine–algae contact detection radius |
 | `sardine_eat_threshold` | **3** | Reduced from 5; algae eaten before sardine reproduces; 0 = disabled |
-| `sailfish_eat_radius` | **25.0** | Widened from 20 px; sailfish–sardine contact detection radius; one kill per sailfish per tick || `algae_size` | 4.0 | px (circle radius) |
+| `sailfish_eat_radius` | **25.0** | Widened from 20 px; sailfish–sardine contact detection radius; one kill per sailfish per tick |
+| `algae_size` | 4.0 | px (circle radius) |
+| `sailfish_starvation_enabled` | `True` | Runtime toggle; when `False` the starvation pass is skipped entirely |
+| `sailfish_reproduction_enabled` | `True` | Runtime toggle; when `False` the reproduction pass is skipped entirely |
+| `mouse_predator_enabled` | `True` | Toggle; when `False` sardines ignore the cursor entirely |
+| `mouse_predator_radius` | `100.0` | px; sardines within this distance of the cursor flee (same default as `radius_flee`) |
+| `mouse_predator_flee_weight` | `1.0` | Multiplier on `weight_flee` for mouse-flee force; 1.0 = same intensity as a real sailfish |
 
 ### Override file
 - `boids_overrides.json` (gitignored) — partial override dict.
@@ -337,23 +369,21 @@ All defaults live in `config/config.py` → `SimConfig` frozen dataclass. This i
 
 ### What works
 - All modules import cleanly; no circular imports.
-- 169/169 tests pass (`python -m unittest tests.tests`).
+- 198 tests pass (`python -m unittest tests.tests`).
 - `python main.py` opens a resizable window; all features operational.
-- Sardine flocking: stable, tuned, numerically bounded.
-- Sailfish pursuit + sardine flee: working, three-grid architecture clean.
-- **Algae drifting**: 800 algae spawn randomly; alignment-dominant flocking gives a gentle water-current drift; rendered as small **reddish-brown circles** (`(170, 50, 20, 255)`, radius 4 px) layered behind sardines/sailfish; HUD shows algae count + total eaten.
-- **Sardine–algae eating (Stage 8.3)**: each frame, sardines consume algae within `algae_eat_radius` (14 px); eaten algae are removed from `simulation.algae` and their Triangle shapes removed from the renderer in O(K) via `_algae_shape_map`; `Sardine.food_counter` and `hunger_timer` tracked. HUD now shows `Eaten ↑N`.
-- **Sardine reproduction (Stage 8.4)**: when `food_counter >= sardine_eat_threshold` (default 3), a new offspring Sardine is appended to `simulation.sardines` at a perpendicular offset from the parent (= `radius_separation`); `food_counter -= threshold` preserves excess; `_sardine_born` list consumed by renderer each frame to allocate one new Triangle per offspring with zero full-reset overhead. `stats_sardine_births` tracks cumulative births.
-- **Sailfish predation (Stage 8.6)**: each sailfish queries the sardine grid within `sailfish_eat_radius` each frame; the first candidate is eaten (one per sailfish per tick to prevent mass-kill); the sardine is removed from `simulation.sardines`; sailfish `food_counter += 1` and `hunger_timer = 0.0`; `_sardines_eaten_ids` set consumed by renderer to delete the matched Triangle and VelColorState in O(K) without a full reset; `stats_sardines_eaten` tracks cumulative predation.
-- **Sardine starvation (Stage 8.5)**: after each eating pass, sardines with `hunger_timer > sardine_starvation_time` are removed; `_sardines_starved_ids` side-channel consumed by renderer (unioned with `_sardines_eaten_ids`) for O(K) shape removal; `stats_sardine_starvations` accumulates. Configurable initial hunger time (`sardine_initial_hunger_time=15.0`) staggers startup deaths. `sardine_starvation_time=0.0` disables the mechanic.
-- **Sailfish starvation (Stage 8.7)**: mirror of sardine starvation for sailfish; `hunger_timer` incremented before eating so a sailfish that eats the same frame it would starve survives; `_sailfish_died_ids` side-channel + `_sailfish_shape_map` O(K) renderer removal; `stats_sailfish_starvations` accumulates. Configurable via `sailfish_starvation_time` (default 90 s) and `sailfish_initial_hunger_time` (default 40 s).
-- **HUD ecosystem metrics**: HUD now shows 7 lines of data refreshed at 4 Hz (`_REFRESH = 0.25 s`): (1) FPS + frame/update/render timing; (2) per-species live counts + total; (3) algae eaten ↑N  spawned ↑N; (4) sardine born ↑N  starved ↑N  eaten ↑N  avg hunger Xs; (5) sailfish starved ↑N  avg hunger Xs  [COLOR]; (6) world size; (7) control hints. Average hunger is `sum(agent.hunger_timer)/N` — O(N) but runs only 4×/s, negligible at N=300. Label widened to 520 px to accommodate the extra lines without wrapping key metrics.
-- **Ecosystem balance tuning**: default counts rebalanced: `num_sardines` 900 → 300, `num_algae` 500 → 800; `sardine_eat_threshold` 5 → 3; `sardine_starvation_time` 20 → 30 s; `sardine_initial_hunger_time` 10 → 15 s; `sailfish_eat_radius` 20 → 25 px; `sailfish_starvation_time` 45 → 90 s; `sailfish_initial_hunger_time` 20 → 40 s.  Root cause of prior guaranteed collapse: algae were a finite resource — 900 sardines depleted 500 algae in ≤2 s, leaving no time for reproduction or starvation dynamics to play out.
-- Live resize and fullscreen: in-place world geometry update, no respawn (algae positions wrapped on resize, `_algae_grid` resized).
-- Config menu: 25+ params across 8 sections, panel scrolls (fixed 418 px height, 16 visible rows at once); int fields (`sardine_eat_threshold`, `algae_max_count`) cast correctly; all ecosystem parameters editable live; save/load round-trip lossless.
-- **Ecosystem config params in live menu**: all major ecology knobs (`algae_respawn_rate`, `algae_max_count`, `algae_eat_radius`, `sardine_eat_threshold`, `sardine_starvation_time`, `sailfish_eat_radius`, `sailfish_starvation_time`, `algae_max_speed`, `weight_algae_alignment`, `weight_algae_separation`) editable at runtime; int-typed fields preserved through `apply_config`; all changes visible within the ecology pass on the very next `update()` call.  Menu panel scrolls automatically — no overflow on any window size.
-- Velocity-based colouring: 7 modes, cosine cyclic mapping (no flicker), sailfish colour modes.
-- Population synced to config on add/remove for correct save behaviour.
+- **Sardine flocking**: separation / alignment / cohesion / noise — stable, tuned, and numerically bounded.
+- **Sailfish pursuit + sardine flee**: sailfish steer toward sardine COM; sardines flee on detection and scatter (cohesion suppressed while fleeing); three-grid architecture clean.
+- **Algae drift**: 800 algae with alignment-dominant flocking; rendered as reddish-brown circles (`(170, 50, 20, 255)`, radius 4 px) behind sardines/sailfish; respawn accumulator-based up to `algae_max_count` (1200).
+- **Three-level food chain**: sardines eat algae on contact; sardines reproduce when fed; sailfish eat sardines; both species starve if unfed; all ecology params configurable live.
+- **Reproduction**: sardines and sailfish both reproduce via `food_counter >= threshold`; offspring spawn beside parent at perpendicular offset; excess counter carries forward. HUD shows cumulative births for each.
+- **Starvation**: configurable per species; `hunger_timer` incremented each frame; every new sailfish (startup, `add_sailfish()`, reproduction) starts with `hunger_timer = 0.0` — equivalent to "just eaten" — so no spawn path can produce an immediately-dying fish; `starvation_time=0.0` disables mechanic. **`sailfish_starvation_enabled`** toggle allows instant on/off without clearing the numeric threshold. (`sailfish_initial_hunger_time` remains in `SimConfig` for JSON backwards-compatibility but is no longer read by the constructor.)
+- **Sailfish reproduction toggle**: **`sailfish_reproduction_enabled`** bool allows disabling reproduction independently of the numeric threshold.
+- **HUD ecosystem metrics**: 7 lines refreshed at 4 Hz — FPS/timing, live counts per species, algae eaten/spawned, sardine born/starved/eaten + avg hunger, sailfish starved + avg hunger + `[STARV OFF]`/`[REPRO OFF]` indicators when toggles are off, world size, control hints.
+- **Live resize and fullscreen**: world geometry updates in-place; algae positions wrapped; all three grids resized.
+- **Config menu**: 40 rows across 8 sections; scrollable panel (16 visible rows, ▲/▼ indicators); int fields (`sardine_eat_threshold`, `algae_max_count`) preserved through `apply_config`; save/load round-trip lossless.
+- **Velocity-based colouring**: 7 sardine modes, 5 sailfish modes; cosine cyclic mapping eliminates heading-wrap flicker.
+- **Config persistence**: `boids_overrides.json` atomic write; population counts synced to live state on save.
+- **Mouse predator**: left-click/drag scatters sardines using existing flee mechanics; `_MouseStimulus` shared object on `Simulation`; read lock-free by all sardines via duck-typed ref; faint red danger-radius circle drawn outside batch; fully configurable via menu; 16 tests in `TestMousePredator`.
 
 
 ### Partially complete
@@ -401,16 +431,13 @@ All defaults live in `config/config.py` → `SimConfig` frozen dataclass. This i
 ## 8. TODO / Next Steps
 
 ### High priority
-1. ~~**Add `TestConfigPersistence` and `TestApplyConfig` test suites**~~ — partially covered by new `TestConfigMenuEcosystem` (7 tests: starvation/threshold/radius live-apply, int field types, persistence round-trip).  Remaining gap: broader `load_overrides` edge-case coverage (corrupt JSON, unknown fields, colour-mode validation).
+1. **`load_overrides` edge-case test coverage** — corrupt JSON, unknown fields, colour-mode validation. `TestConfigMenuEcosystem` partially covers config persistence.
 
 ### Medium priority
-2. **`num_sardines` / `num_sailfish` as editable menu rows** — they already persist correctly. Needs respawn or population-adjustment logic on value change (not trivial; separate from the slider model).
+2. **`num_sardines` / `num_sailfish` as editable menu rows** — they already persist correctly. Needs population-adjustment logic on value change (not trivial; separate from the slider model).
 3. **Cross-field constraint enforcement** — clamp `radius_separation < radius_alignment` and `radius_alignment ≤ radius_cohesion` inside `_adjust_value()`.
 
-### Phase 8 (ecosystem — complete)
-See **Section 10** for the original staged plan (now fully implemented — all stages 8.1–8.8 shipped).
-
-### Phase 9 (future, post-ecosystem)
+### Phase 9 (future)
 4. **Nearest-prey targeting** — individual pursuit rather than group COM; biologically more accurate for a single sailfish.
 5. **Sailfish burst acceleration** — short high-speed sprint with cooldown.
 6. **Per-sardine danger memory** — smooth cohesion restoration after escape (timer-based rather than instantaneous).
@@ -421,307 +448,6 @@ See **Section 10** for the original staged plan (now fully implemented — all s
 
 ## 9. References
 
-- **[ARCHIVE.md](ARCHIVE.md)** — Phase-by-phase build history, implementation archaeology, subclass interface contract, algorithmic complexity reference, historical tuning table.
-- **[tests/tests.py](tests/tests.py)** — 185 tests across 15 suites: `TestVec2`, `TestBoidKinematics`, `TestSpatialHash`, `TestSimulationIntegrity`, `TestPhase2`, `TestAlgaeKinematics`, `TestEcologyContactDetection`, `TestSardineReproduction`, `TestSailfishEcology`, `TestSardineStarvation`, `TestSailfishStarvation`, `TestAlgaeRespawn`, `TestHudEcosystem`, `TestConfigMenuEcosystem`, `TestSailfishReproduction`.
+- **[ARCHIVE.md](ARCHIVE.md)** — Phase-by-phase build history, implementation archaeology, subclass interface contract, algorithmic complexity reference, historical tuning table, Phase 8 ecosystem plan.
+- **[tests/tests.py](tests/tests.py)** — 214 tests across 18 suites: `TestVec2`, `TestBoidKinematics`, `TestSpatialHash`, `TestSimulationIntegrity`, `TestPhase2`, `TestAlgaeKinematics`, `TestEcologyContactDetection`, `TestSardineReproduction`, `TestSailfishEcology`, `TestSardineStarvation`, `TestSailfishStarvation`, `TestAlgaeRespawn`, `TestHudEcosystem`, `TestConfigMenuEcosystem`, `TestSailfishReproduction`, `TestSailfishSpawnInit`, `TestSailfishToggles`, `TestMousePredator`.
 - **[config/config.py](config/config.py)** — Authoritative parameter definitions with inline comments.
-
----
-
-## 10. Phase 8: Ecosystem — Algae, Food Chains, and Population Dynamics
-
-> **Status**: Complete. All stages implemented and tested.
-> Original branch: `ecosystem`
-
----
-
-### 10.1 Overview
-
-Add a three-level food chain:
-
-```
-Algae  →  Sardines eat algae  →  Sardines reproduce
-Sardines  →  Sailfish eat sardines
-Each predator starves if it goes too long without eating.
-```
-
-Population is self-regulating: sardines grow when algae is plentiful; sailfish keep sardine numbers in check; starvation provides a top-down population floor for predators.
-
----
-
-### 10.2 Architecture changes
-
-#### New file: `sim/algae.py` — `Algae(Boid)`
-
-Algae **subclasses `Boid`** (the same base as `Sardine` and `Sailfish`). Rationale:
-
-- `Boid` already handles position/velocity/acceleration, Euler integration, boundary wrapping, and speed clamping — all of which algae need.
-- The `_compute_forces()` hook is exactly the override point for algae's light flocking.
-- Algae must live in a spatial hash so sardines can query it during eating; the hash already works on any `Boid` subclass.
-- A fully custom "lightweight particle" entity would save one `np.zeros(2)` allocation per algae per spawn (negligible) at the cost of duplicating all kinematics logic. Not worth it.
-
-`Algae._compute_forces()` implements a **low-weight Reynolds flocking with no predator awareness**:
-- Alignment-dominant (strong): gives the "drift with current" visual.
-- Separation very weak (prevents overlap but doesn't scatter).
-- Cohesion very weak (loose aggregate, not tight school).
-- Moderate noise weight: organic drift feel.
-- No flee behaviour. Algae does not react to sardines or sailfish.
-
-Algae has `min_speed = 0.0` (can drift to near-stop in calm regions).
-
-#### New per-agent state: `food_counter` and `hunger_timer`
-
-Added as plain instance attributes on `Sardine` and `Sailfish` (not a new subclass). These are simple floats initialised in `__init__`:
-
-| Attribute | Type | Sardine | Sailfish |
-|---|---|---|---|
-| `food_counter` | `float` | algae eaten (increments toward reproduction threshold) | sardines eaten (currently unused beyond hunger reset) |
-| `hunger_timer` | `float` | seconds since last algae eaten | seconds since last sardine eaten |
-
-Both agents are initialised with `hunger_timer = config.<species>_initial_hunger_time` so the full population does not immediately die at startup (the initial timer is below the starvation threshold).
-
-#### New spatial hash: `_algae_grid`
-
-A third `SpatialHash` owned by `Simulation`. Algae query it in `_compute_forces()` for flocking; the ecology pass queries it to find algae near each sardine.
-
-Updated grid ownership in `Simulation`:
-
-| Grid | Contents | Queried by |
-|---|---|---|
-| `_grid` | Sardines only | Sardines (flocking) + Sailfish (pursuit) |
-| `_sailfish_grid` | Sailfish only | Sardines (flee) |
-| `_algae_grid` *(new)* | Algae only | Algae (flocking) + Simulation ecology pass (eating) |
-
-Algae need a reference to `_algae_grid` injected at construction (same pattern as Sardine receiving `_grid`).
-
-#### New ecology pass in `Simulation.update()`
-
-After all agents have called `agent.update(dt)`, a new ecology pass runs. This is the right place (not in `_compute_forces()`) because eating and dying modify the world's agent lists, which must not be mutated while iterating.
-
-```python
-# Ecology pass (runs after all agent.update(dt) calls):
-1. Rebuild _algae_grid (same phase as sardine/sailfish grids at frame start)
-2. Increment hunger_timer on all sardines and sailfish by dt
-3. Sardine-algae eating:
-     for each sardine:
-         algae_nearby = _algae_grid.query(sardine, algae_eat_radius)
-         for each algae in algae_nearby:
-             mark algae for removal
-             sardine.food_counter += 1
-             sardine.hunger_timer = 0.0
-4. Sailfish-sardine eating:
-     for each sailfish:
-         sardines_nearby = _grid.query(sailfish, sailfish_eat_radius)
-         for each nearby sardine:
-             mark sardine for removal (only first, or one per sailfish per frame)
-             sailfish.food_counter += 1
-             sailfish.hunger_timer = 0.0
-             break  # one sardine per sailfish per tick (avoids mass kill)
-5. Starvation:
-     mark sardines where hunger_timer > sardine_starvation_time for removal
-     mark sailfish where hunger_timer > sailfish_starvation_time for removal
-6. Reproduction:
-     for each sardine with food_counter >= sardine_eat_threshold:
-         queue one offspring sardine at parent position + small offset
-         sardine.food_counter = 0
-7. Algae respawn:
-     accrue fractional algae_spawn_accumulator += algae_respawn_rate * dt
-     while accumulator >= 1.0: spawn one algae at random position; accumulator -= 1.0
-8. Flush removals (iterate removal sets; remove from lists; remove Triangle shapes)
-9. Flush additions (append offspring sardines; allocate shapes)
-```
-
-**Why one kill per sailfish per tick**: prevents a single sailfish from eating an entire nearby school in one frame if the query returns many fish. One eat per tick at 60 fps is already very fast relative to starvation times.
-
-#### Renderer changes
-
-`Renderer` needs a third entity pass. The existing pattern (one shape per agent in a single batch) extends naturally:
-
-- `self.algae_shapes: list[pyglet.shapes.Circle]` — reddish-brown circles (`(170, 50, 20, 255)`), radius driven by `algae_size`.
-- `_sync_circle_positions()` updates only `circle.x / circle.y` per frame (no heading math needed).
-- `_make_algae_shapes()` allocates circles; `_make_shapes()` allocates triangles for sardines/sailfish.
-- Algae use a fixed reddish-brown colour (no velocity-colour modes).
-- HUD updated to show algae count alongside sardine/sailfish counts.
-
-#### `Simulation.apply_config()` additions
-
-Must propagate new algae kinematic config fields to all `Algae` agents and refresh cached values (same pattern as sardines/sailfish).
-
-#### `Simulation.resize()` additions
-
-Must wrap algae positions and update `_algae_grid.resize()` similarly to sardines and sailfish.
-
----
-
-### 10.3 New config fields
-
-All added to `SimConfig` in `config/config.py`.
-
-#### Algae
-
-| Field | Default | Notes |
-|---|---|---|
-| `num_algae` | `500` | Initial population |
-| `algae_max_speed` | `30.0` | px/s; slow drift |
-| `algae_min_speed` | `0.0` | Can stop |
-| `algae_max_force` | `15.0` | px/s²; gentle steering |
-| `weight_algae_alignment` | `1.5` | Dominant — currents feel |
-| `weight_algae_separation` | `0.2` | Very weak |
-| `weight_algae_cohesion` | `0.2` | Very weak |
-| `weight_algae_noise` | `0.1` | Moderate organic drift |
-| `radius_algae_separation` | `12.0` | px |
-| `radius_algae_alignment` | `50.0` | px |
-| `radius_algae_cohesion` | `55.0` | px |
-| `algae_cell_size` | `55.0` | px; ≥ `radius_algae_cohesion` |
-| `algae_size` | `4.0` | px; circle radius (smaller than sardines) |
-| `algae_eat_radius` | `12.0` | px; contact distance for sardine eating |
-| `algae_respawn_rate` | `3.0` | new algae per second (Simulation spawns them) |
-
-#### Sardine ecology
-
-| Field | Default | Notes |
-|---|---|---|
-| `sardine_eat_threshold` | `5` | Algae pieces eaten before reproducing |
-| `sardine_starvation_time` | `20.0` | s; hunger_timer > this → death |
-| `sardine_initial_hunger_time` | `10.0` | s; initial hunger_timer (< starvation); stagger startup deaths |
-
-#### Sailfish ecology
-
-| Field | Default | Notes |
-|---|---|---|
-| `sailfish_eat_radius` | `20.0` | px; contact distance for sailfish eating sardine |
-| `sailfish_starvation_time` | `45.0` | s; longer than sardines — big predators last longer |
-| `sailfish_initial_hunger_time` | `20.0` | s; initial hunger_timer |
-
-**Note on algae color**: algae will use a fixed `(20, 180, 80, 255)` green colour. A `algae_color_mode` field can be added later if palette cycling is desired. A `algae_color` config tuple is not added immediately — it is hard-coded in the renderer for Phase 8 and promoted to config only if needed.
-
----
-
-### 10.4 New statistics / metrics
-
-#### HUD additions
-
-| Metric | Where | Notes |
-|---|---|---|
-| Algae count | HUD, agents row | Third count after sardines/sailfish |
-| Sardine births | HUD (optional, epoch) | Running total or sliding window |
-| Sardine deaths (starvation) | HUD (optional, epoch) | |
-| Sardines eaten (by sailfish) | HUD (optional, epoch) | |
-| Sailfish deaths (starvation) | HUD (optional, epoch) | |
-
-For Phase 8 launch, adding only the algae count to the HUD is sufficient. The per-epoch birth/death counters are tracked internally by `Simulation` (simple int attributes) and accessible for future HUD or logging expansion.
-
-#### `Simulation` internal counters (new attributes)
-
-```python
-self.stats_sardine_births:        int = 0
-self.stats_sardine_starvations:   int = 0   # ✅ implemented
-self.stats_sardines_eaten:        int = 0
-self.stats_sailfish_starvations:  int = 0   # ✅ implemented
-```
-
-These increment each ecology pass; never reset (monotonic). The renderer/HUD can read them as needed.
-
-Side-channels (cleared every frame, read by renderer):
-
-```python
-self._sardines_eaten_ids:   set[int]  # predation deaths
-self._sardines_starved_ids: set[int]  # starvation deaths  ✅ implemented
-self._sailfish_died_ids:    set[int]  # sailfish starvation ✅ implemented
-self._sardine_born:         list      # new offspring
-```
-
----
-
-### 10.5 Staged implementation order
-
-Each stage is independently testable. Do not merge a stage until its tests pass.
-
-| Stage | What | Key files changed |
-|---|---|---|
-| **8.1** ✅ | `Algae(Boid)` entity + `_algae_grid` + spawning + algae flocking (no eating) | `sim/algae.py` (new), `sim/simulation.py`, `config/config.py` |
-| **8.2** ✅ | Renderer algae pass (green triangles, HUD algae count) | `rendering/renderer.py` |
-| **8.3** ✅ | Sardine `food_counter` + `hunger_timer`; ecology pass: sardine-algae eating; algae removal; `Eaten ↑N` HUD | `sim/sardine.py`, `sim/simulation.py`, `rendering/renderer.py`, `config/config.py` |
-| **8.4** ✅ | Sardine reproduction (`food_counter >= threshold` → offspring spawn, counter decremented) | `sim/simulation.py`, `rendering/renderer.py`, `config/config.py` |
-| **8.5** ✅ | Sardine starvation | `sim/simulation.py`, `config/config.py`, `sim/sardine.py`, `rendering/renderer.py` |
-| **8.6** ✅ | Sailfish `food_counter` + `hunger_timer`; ecology pass: sailfish-sardine eating; sardine removal | `sim/sailfish.py`, `sim/simulation.py`, `rendering/renderer.py`, `config/config.py` |
-| **8.7** ✅ | Sailfish starvation | `sim/simulation.py`, `config/config.py`, `sim/sailfish.py`, `rendering/renderer.py` |
-| **8.8** | `apply_config()` and `resize()` extended for algae | `sim/simulation.py` |
-| **8.9** | Config menu rows for key ecosystem params | `config/config_menu.py` |
-| **8.10** | Ecosystem stat counters + optional HUD expansion | `sim/simulation.py`, `rendering/renderer.py` |
-
-**Recommended order rationale**: Stages 8.1–8.2 establish the algae visual layer with zero gameplay change, making it safe to ship and demo. Stages 8.3–8.5 add sardine-side ecology. Stages 8.6–8.7 add sailfish-side ecology. Only after both sides work do we wire up config menu and stats.
-
----
-
-### 10.6 Testing plan
-
-New test suites to add to `tests/tests.py` (alongside the 53 existing tests).
-
-#### `TestAlgaeKinematics` (Stage 8.1)
-
-| Test | What is verified |
-|---|---|
-| `test_algae_moves_after_update` | `algae.update(dt)` advances position |
-| `test_algae_respects_max_speed` | speed never exceeds `algae_max_speed` |
-| `test_algae_boundary_wrap` | position wraps at world edges |
-| `test_algae_can_stop` | `min_speed=0` means speed can reach 0 |
-| `test_algae_grid_insertion` | algae correctly inserted and queried from `SpatialHash` |
-| `test_algae_flocking_alignment` | two aligned algae do not diverge in heading (net force pushes toward alignment) |
-
-#### `TestEcologyContactDetection` (Stage 8.3)
-
-| Test | What is verified |
-|---|---|
-| `test_sardine_eats_algae_on_contact` | sardine within `algae_eat_radius` → `food_counter` increments |
-| `test_sardine_does_not_eat_distant_algae` | sardine outside radius → no increment |
-| `test_eaten_algae_marked_for_removal` | algae is added to removal set on contact |
-| `test_hunger_timer_increments_with_dt` | `hunger_timer` grows by `dt` each frame |
-| `test_hunger_timer_resets_on_eat` | eating algae resets `hunger_timer` to 0 |
-
-#### `TestSardineReproduction` (Stage 8.4)
-
-| Test | What is verified |
-|---|---|
-| `test_reproduction_when_threshold_met` | sardine with `food_counter == eat_threshold` spawns offspring |
-| `test_food_counter_resets_after_reproduction` | parent's `food_counter` is 0 after split |
-| `test_offspring_near_parent` | offspring position is close to parent (not random) |
-| `test_no_reproduction_below_threshold` | `food_counter < threshold` → no new sardine |
-| `test_population_grows_after_eating` | sardine count increases over a simulated eating sequence |
-
-#### `TestSardineStarvation` (Stage 8.5)
-
-| Test | What is verified |
-|---|---|
-| `test_sardine_removed_when_starved` | `hunger_timer > starvation_time` → sardine removed from simulation |
-| `test_sardine_survives_below_threshold` | `hunger_timer < starvation_time` → sardine stays |
-| `test_algae_respawn_adds_algae` | over N frames, algae count rises toward `num_algae` when no sardines present |
-
-#### `TestSailfishEcology` (Stages 8.6–8.7)
-
-| Test | What is verified |
-|---|---|
-| `test_sailfish_eats_sardine_on_contact` | sailfish within `sailfish_eat_radius` → sardine removed, `food_counter` increments |
-| `test_sailfish_hunger_timer_increments` | `hunger_timer` grows each frame |
-| `test_sailfish_hunger_resets_after_eat` | eating resets hunger to 0 |
-| `test_sailfish_removed_when_starved` | `hunger_timer > sailfish_starvation_time` → removal |
-| `test_sailfish_does_not_eat_distant_sardine` | outside radius → no kill |
-
-#### `TestEcosystemIntegrity` (Stage 8.10, integration)
-
-| Test | What is verified |
-|---|---|
-| `test_ecosystem_does_not_collapse_early` | at default params, all three species co-exist for at least N simulated seconds |
-| `test_sardine_population_bounded` | sardine count does not grow unboundedly with unlimited algae |
-| `test_algae_population_recovers` | after removing all sardines, algae respawn to near `num_algae` within T seconds |
-| `test_stat_counters_increment` | `stats_sardine_births`, `stats_sardines_eaten`, etc. accumulate correctly |
-
----
-
-### 10.7 Known design constraints and open questions
-
-- **Menu height overflow**: the config menu is already ~528 px with 21 rows. Ecosystem adds ~8–10 new tunable parameters. A scroll mechanism or a second "Ecosystem" config panel will be needed. Plan: add a horizontal page-switch (`[` / `]`) to cycle between KINEMATICS and ECOSYSTEM pages, each independently scrollable.
-- **Algae respawn rate vs. population**: tuning is needed. If `algae_respawn_rate` is too low, sardines eat algae to extinction; too high, algae overflow the renderer. The `num_algae` target could be a soft cap, with spawning paused above it.
-- **Sardine minimum population floor**: if all sardines starve before eating enough algae to reproduce, the simulation empties. An initial hunger time (`sardine_initial_hunger_time`) partially mitigates this; a `sardine_starvation_enabled: bool` toggle is a useful debug escape hatch.
-- **Sailfish solo start**: at 8 sailfish with `sailfish_starvation_time = 45 s` and ~900 sardines, sailfish should survive comfortably. If sardine population collapses first, sailfish will starve. This is ecologically correct but may need tuning.
-- **Offspring placement**: reproduction offspring should be placed at parent position + small random offset (< sardine body length), not at a random world position, so the school effect is preserved. If spawned exactly at the parent, they'll immediately separate due to separation force — which is fine.
-- **One-eat-per-sailfish-per-tick limitation**: prevents mass kill but means a sailfish surrounded by 20 sardines eats only 1/tick. This is biologically reasonable and prevents population crashes from tight-school contacts.

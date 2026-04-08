@@ -343,3 +343,117 @@ Full parameter tuning progression across phases:
 | `radius_flee` | 100.0 | — | Phase 2 |
 | `weight_flee` | 10.0 | 4.0 → 6.0 | Raised; must exceed sep (2.0) |
 | `sailfish_cell_size` | 120.0 | 120.0 | Phase 2 |
+
+---
+
+## Phase 8 — Ecosystem: Algae, Food Chains, and Population Dynamics
+
+> Status: Fully implemented. All stages 8.1–8.8 shipped. Current behavior described in PROJECT_LOG.md.
+
+### Overview
+
+Three-level food chain:
+
+```
+Algae  →  Sardines eat algae  →  Sardines reproduce
+Sardines  →  Sailfish eat sardines
+Each predator starves if it goes too long without eating.
+```
+
+Population is self-regulating: sardines grow when algae is plentiful; sailfish keep sardine numbers in check; starvation provides a top-down population floor for predators.
+
+### Architecture additions
+
+#### `sim/algae.py` — `Algae(Boid)`
+
+Algae subclasses `Boid` (same base as `Sardine` and `Sailfish`). Rationale: `Boid` already handles position/velocity/acceleration, Euler integration, boundary wrapping, and speed clamping. The `_compute_forces()` hook is exactly the override point for algae's light flocking. Algae must live in a spatial hash so sardines can query it during eating.
+
+`Algae._compute_forces()`: alignment-dominant Reynolds flocking with no predator awareness. `min_speed = 0.0` (can drift to near-stop).
+
+#### `food_counter` and `hunger_timer`
+
+Added as plain instance attributes on `Sardine` and `Sailfish` (not a new subclass):
+
+| Attribute | Type | Sardine | Sailfish |
+|---|---|---|---|
+| `food_counter` | `float` | algae eaten (toward reproduction threshold) | sardines eaten (toward reproduction threshold) |
+| `hunger_timer` | `float` | seconds since last algae eaten | seconds since last sardine eaten |
+
+Both initialised with `hunger_timer = config.<species>_initial_hunger_time` to stagger startup deaths.
+
+#### `_algae_grid` — third SpatialHash
+
+| Grid | Contents | Queried by |
+|---|---|---|
+| `_grid` | Sardines only | Sardines (flocking) + Sailfish (pursuit) |
+| `_sailfish_grid` | Sailfish only | Sardines (flee) |
+| `_algae_grid` | Algae only | Algae (flocking) + ecology pass (eating) |
+
+#### Ecology pass in `Simulation.update()`
+
+Runs after all `agent.update(dt)` calls (world mutation must not occur during iteration):
+
+1. Rebuild `_algae_grid`
+2. Increment `hunger_timer` on all sardines and sailfish by `dt`
+3. Sardine–algae eating: sardines query `_algae_grid` at `algae_eat_radius`; mark algae for removal; `food_counter += 1`; `hunger_timer = 0.0`
+4. Sailfish–sardine eating: sailfish query `_grid` at `sailfish_eat_radius`; one kill per sailfish per tick (prevents mass kill); `food_counter += 1`; `hunger_timer = 0.0`
+5. Starvation: mark agents where `hunger_timer > starvation_time`
+6. Reproduction: sardine/sailfish with `food_counter >= threshold` spawn one offspring at perpendicular offset; `food_counter -= threshold` (not reset, preserves excess)
+7. Algae respawn: accumulator-based fractional spawn up to `algae_max_count`
+8. Flush removals and additions; update renderer side-channels
+
+**Why one kill per sailfish per tick**: prevents a single sailfish from eating an entire nearby school in one frame.
+
+### Original Phase 8 config defaults (pre-tuning)
+
+| Field | Original default | Final default | Change |
+|---|---|---|---|
+| `num_sardines` | 900 | 300 | Root cause of early collapse: 900 sardines depleted 500 algae in ≤2 s |
+| `num_algae` | 500 | 800 | |
+| `algae_respawn_rate` | 3.0 | 8.0 | |
+| `algae_max_count` | — | 1200 | Added as soft cap |
+| `sardine_eat_threshold` | 5 | 3 | |
+| `sardine_starvation_time` | 20.0 | 30.0 | |
+| `sardine_initial_hunger_time` | 10.0 | 15.0 | |
+| `sailfish_eat_radius` | 20.0 | 25.0 | |
+| `sailfish_starvation_time` | 45.0 | 90.0 | |
+| `sailfish_initial_hunger_time` | 20.0 | 40.0 | |
+| `algae_max_speed` | 30.0 | 25.0 | |
+| `algae_max_force` | 15.0 | 12.0 | |
+| `algae_eat_radius` | 12.0 | 14.0 | |
+| `weight_algae_separation` | 0.2 | 0.3 | |
+| `radius_algae_separation` | 12.0 | 18.0 | |
+| `radius_algae_alignment` | 50.0 | 55.0 | sep:coh = 1:3 |
+| `radius_algae_cohesion` | 55.0 | 55.0 | |
+| `algae_cell_size` | 55.0 | 60.0 | |
+
+### Staged implementation
+
+| Stage | What | Status |
+|---|---|---|
+| 8.1 | `Algae(Boid)` + `_algae_grid` + spawning + algae flocking | ✅ |
+| 8.2 | Renderer algae pass (reddish-brown circles, HUD algae count) | ✅ |
+| 8.3 | Sardine `food_counter`/`hunger_timer`; ecology pass; algae eating; `Eaten ↑N` HUD | ✅ |
+| 8.4 | Sardine reproduction | ✅ |
+| 8.5 | Sardine starvation | ✅ |
+| 8.6 | Sailfish `food_counter`/`hunger_timer`; sailfish–sardine eating | ✅ |
+| 8.7 | Sailfish starvation | ✅ |
+| 8.8 | `apply_config()` and `resize()` extended for algae | ✅ |
+| 8.9 | Config menu rows for ecosystem params (8 sections, 40 rows, scrollable) | ✅ |
+| 8.10 | Ecosystem stat counters + HUD expansion (7-line HUD) | ✅ |
+
+### Sailfish reproduction (added post-8.10)
+
+Added sailfish reproduction mirroring sardine reproduction: `food_counter >= sailfish_eat_threshold` → spawn one offspring; `food_counter -= threshold`; HUD shows cumulative births. `TestSailfishReproduction` suite added.
+
+### Design constraints (resolved)
+
+- **Menu height overflow**: solved by scroll mechanism — fixed 418 px panel height, 16 visible rows, ↑/↓ navigation with ▲/▼ scroll indicators.
+- **Algae respawn vs. population**: `algae_max_count` soft cap; respawn pauses above it.
+- **Sardine minimum population floor**: `sardine_initial_hunger_time` staggers startup deaths; `sardine_starvation_time=0` disables mechanic.
+- **Offspring placement**: perpendicular offset (`radius_separation`) from parent; separation force naturally disperses.
+- **Algae color**: fixed reddish-brown `(170, 50, 20, 255)` hard-coded in renderer; `algae_color_mode` not added (no demonstrated need).
+
+### Test suites added (Phase 8)
+
+`TestAlgaeKinematics`, `TestEcologyContactDetection`, `TestSardineReproduction`, `TestSailfishEcology`, `TestSardineStarvation`, `TestSailfishStarvation`, `TestAlgaeRespawn`, `TestHudEcosystem`, `TestConfigMenuEcosystem`, `TestSailfishReproduction` — 132 tests added to the original 53, totalling 185.

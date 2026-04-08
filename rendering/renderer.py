@@ -217,6 +217,9 @@ class Hud:
 
             color_mode = cfg.sardine_color_mode
             color_str  = f"  [{color_mode.upper()}]" if color_mode != "white" else ""
+            sf_flags = ""
+            if not cfg.sailfish_starvation_enabled:   sf_flags += "  [STARV OFF]"
+            if not cfg.sailfish_reproduction_enabled: sf_flags += "  [REPRO OFF]"
             W = cfg.window_width
             H = cfg.window_height
         except Exception:
@@ -236,7 +239,7 @@ class Hud:
             f"  avg hunger {sar_hunger}\n"
             f"Sailfish: born\u2191{simulation.stats_sailfish_births}"
             f"  starved\u2191{simulation.stats_sailfish_starvations}"
-            f"  avg hunger {sf_hunger}{color_str}\n"
+            f"  avg hunger {sf_hunger}{sf_flags}{color_str}\n"
             f"World {W} \u00d7 {H} px\n"
             f"\u2191/\u2193 sardines (+/-50)  \u2190/\u2192 sailfish (+/-1)  "
             f"F fullscreen  H HUD  V color-mode  TAB config"
@@ -300,6 +303,10 @@ class Renderer:
         self._last_render_ms: float = 0.0
         self._hud: Hud | None = Hud(window.height) if config.show_hud else None
 
+        # Optional mouse-predator radius indicator (drawn outside the batch).
+        # Created lazily on the first active frame; deleted on reset().
+        self._mouse_indicator: pyglet.shapes.Circle | None = None
+
     # ── One-time setup ────────────────────────────────────────────────
 
     def reset(self, sardines: list["Boid"], sailfish: list["Boid"] | None = None, algae: list["Boid"] | None = None) -> None:
@@ -321,6 +328,10 @@ class Renderer:
         for shape in self._sailfish_shapes:
             shape.delete()
         self._sailfish_shapes.clear()
+
+        if self._mouse_indicator is not None:
+            self._mouse_indicator.delete()
+            self._mouse_indicator = None
 
         # Algae first — drawn behind sardines and sailfish.
         self._algae_shapes = self._make_algae_shapes(
@@ -547,6 +558,23 @@ class Renderer:
         )
         self._batch.draw()
         self._last_render_ms = (time.perf_counter() - t0) * 1000.0
+
+        # ── Mouse predator visual indicator ───────────────────────────────
+        # Draw a faint red filled circle at the cursor when the mouse
+        # predator is active.  Drawn outside the batch so it appears on top
+        # of all fish, and so it never interferes with the agent shape maps.
+        ms = simulation._mouse_stimulus
+        if cfg.mouse_predator_enabled and ms.active:
+            if self._mouse_indicator is None:
+                self._mouse_indicator = pyglet.shapes.Circle(
+                    ms.x, ms.y, ms.radius,
+                    color=(220, 40, 40, 40),
+                )
+            else:
+                self._mouse_indicator.x      = ms.x
+                self._mouse_indicator.y      = ms.y
+                self._mouse_indicator.radius = ms.radius
+            self._mouse_indicator.draw()
 
         if self._hud is not None:
             self._hud.update(simulation, update_ms, self._last_render_ms)

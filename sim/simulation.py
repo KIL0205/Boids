@@ -27,6 +27,30 @@ if TYPE_CHECKING:
     from sim.boid import Boid
 
 
+class _MouseStimulus:
+    """Shared mutable container for the mouse-as-predator stimulus.
+
+    One instance lives on ``Simulation`` and is shared by reference across
+    **all** sardines.  The simulation updates ``.active``, ``.x``, ``.y``
+    when mouse events arrive; sardines read the same object in
+    ``_compute_forces()`` — no back-reference to ``Simulation`` needed.
+
+    ``.radius`` / ``.radius_sq`` are refreshed by ``apply_config()``
+    whenever ``mouse_predator_radius`` changes so each sardine always sees
+    the current detection radius without a per-frame config lookup.
+    """
+
+    __slots__ = ("active", "x", "y", "radius", "radius_sq", "flee_weight_mult")
+
+    def __init__(self, radius: float, flee_weight_mult: float) -> None:
+        self.active:           bool  = False
+        self.x:                float = 0.0
+        self.y:                float = 0.0
+        self.radius:           float = radius
+        self.radius_sq:        float = radius * radius
+        self.flee_weight_mult: float = flee_weight_mult
+
+
 class Simulation:
     """Top-level world state container.
 
@@ -65,6 +89,15 @@ class Simulation:
             cell_size=config.algae_cell_size,
             world_width=float(config.window_width),
             world_height=float(config.window_height),
+        )
+
+        # ── Mouse predator stimulus ───────────────────────────────────
+        # Shared mutable object passed to every sardine at creation.
+        # main.py updates .active / .x / .y via set_mouse_predator() /
+        # clear_mouse_predator() in response to pyglet mouse events.
+        self._mouse_stimulus = _MouseStimulus(
+            radius=config.mouse_predator_radius,
+            flee_weight_mult=config.mouse_predator_flee_weight,
         )
 
         self._spawn_sardines()
@@ -147,7 +180,7 @@ class Simulation:
             vy = float(np.sin(angles[i])) * speed
             self.sardines.append(
                 Sardine(x, y, vx, vy, self.config, self._grid,
-                        self._sailfish_grid)
+                        self._sailfish_grid, self._mouse_stimulus)
             )
 
     # ── Initialisation (continued) ────────────────────────────────────
@@ -330,10 +363,10 @@ class Simulation:
 
         # Sailfish starvation: runs after eating so a sailfish that just killed
         # (hunger_timer=0) can never starve the same frame.
-        # starvation_time=0.0 disables sailfish starvation.
+        # starvation_time=0.0 or sailfish_starvation_enabled=False disables.
         if self.sailfish:
             starvation_time = self.config.sailfish_starvation_time
-            if starvation_time > 0.0:
+            if self.config.sailfish_starvation_enabled and starvation_time > 0.0:
                 dying: set = {
                     sf for sf in self.sailfish if sf.hunger_timer > starvation_time
                 }
@@ -343,9 +376,10 @@ class Simulation:
                     self.stats_sailfish_starvations += len(dying)
 
         # Sailfish reproduction: runs after starvation so dying sailfish
-        # don't also reproduce.  threshold=0 disables reproduction.
+        # don't also reproduce.  threshold=0 or sailfish_reproduction_enabled=False
+        # disables reproduction.
         threshold = self.config.sailfish_eat_threshold
-        if threshold > 0 and self.sailfish:
+        if self.config.sailfish_reproduction_enabled and threshold > 0 and self.sailfish:
             self._reproduce_sailfish(threshold)
 
         # ── Algae respawn ─────────────────────────────────────────────
@@ -424,6 +458,7 @@ class Simulation:
                 offspring = Sardine(
                     ox, oy, vx, vy,
                     cfg, self._grid, self._sailfish_grid,
+                    self._mouse_stimulus,
                 )
                 self.sardines.append(offspring)
                 self._sardine_born.append(offspring)
@@ -595,6 +630,35 @@ class Simulation:
             agent.max_speed = new_config.algae_max_speed
             agent.max_force = new_config.algae_max_force
             # min_speed is always 0.0 for algae — not a config field
+        # Propagate mouse predator params to the shared stimulus object so all
+        # sardines see the updated radius / weight without being recreated.
+        ms = self._mouse_stimulus
+        ms.radius           = new_config.mouse_predator_radius
+        ms.radius_sq        = new_config.mouse_predator_radius ** 2
+        ms.flee_weight_mult = new_config.mouse_predator_flee_weight
+
+    # ── Mouse predator interface ──────────────────────────────────────
+
+    def set_mouse_predator(self, x: float, y: float) -> None:
+        """Activate the mouse predator at screen position *(x, y)*.
+
+        Called by ``main.py`` on ``on_mouse_press`` and ``on_mouse_drag``
+        events (left button).  Sardines within ``mouse_predator_radius`` will
+        flee away from this point on the next ``update()`` call.
+        """
+        ms = self._mouse_stimulus
+        ms.active = True
+        ms.x = x
+        ms.y = y
+
+    def clear_mouse_predator(self) -> None:
+        """Deactivate the mouse predator.
+
+        Called by ``main.py`` on ``on_mouse_release`` (left button).  The
+        flee stimulus is removed immediately; sardines return to normal
+        flocking on the next ``update()`` call.
+        """
+        self._mouse_stimulus.active = False
 
     def add_sardines(self, n: int) -> None:
         """Spawn *n* new sardines at random positions and append to the world.
@@ -617,6 +681,7 @@ class Simulation:
                     np.cos(angle) * speed,
                     np.sin(angle) * speed,
                     self.config, self._grid, self._sailfish_grid,
+                    self._mouse_stimulus,
                 )
             )
         self._sync_population_counts()

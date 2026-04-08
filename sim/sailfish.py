@@ -80,9 +80,11 @@ class Sailfish(Boid):
 
         # Ecology: feeding state (Phase 8.6 / 8.7)
         self.food_counter: float = 0.0   # sardines eaten; carries toward future use
-        # Initialised from config so freshly spawned sailfish don't all die at
-        # the same simulation time (same stagger pattern as sardines).
-        self.hunger_timer: float = config.sailfish_initial_hunger_time
+        # Every new sailfish — startup, manually added, or reproduced — starts
+        # with hunger_timer = 0.  This is equivalent to "just eaten" and
+        # guarantees no spawn path can produce an immediately-starving fish
+        # regardless of what sailfish_starvation_time is saved in the config.
+        self.hunger_timer: float = 0.0
 
     # ── Pursuit behaviour ─────────────────────────────────────────────
 

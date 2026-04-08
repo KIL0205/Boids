@@ -141,6 +141,29 @@ def main() -> None:
     # won't fire on any initial geometry event before the simulation exists.
     _ready[0] = True
 
+    # ── Mouse predator event handlers ─────────────────────────────────
+    # Left button press/drag → activate mouse predator at cursor position.
+    # Left button release   → deactivate.
+    # on_mouse_motion is intentionally not hooked: the predator is only
+    # active while the button is held (see spec).
+
+    @window.event
+    def on_mouse_press(x: int, y: int, button: int, modifiers: int) -> None:
+        if button == pyglet.window.mouse.LEFT:
+            simulation.set_mouse_predator(float(x), float(y))
+
+    @window.event
+    def on_mouse_release(x: int, y: int, button: int, modifiers: int) -> None:
+        if button == pyglet.window.mouse.LEFT:
+            simulation.clear_mouse_predator()
+
+    @window.event
+    def on_mouse_drag(
+        x: int, y: int, dx: int, dy: int, buttons: int, modifiers: int
+    ) -> None:
+        if buttons & pyglet.window.mouse.LEFT:
+            simulation.set_mouse_predator(float(x), float(y))
+
     # Advance simulation at the target frame rate; pyglet redraws via on_draw.
     pyglet.clock.schedule_interval(update, 1.0 / config.target_fps)
 
