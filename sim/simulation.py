@@ -102,9 +102,18 @@ class Simulation:
         # Sailfish that died of starvation this frame (Stage 8.7).
         self._sailfish_died_ids: set[int] = set()
 
+        # List of newly born Sailfish objects from the reproduction pass in
+        # the most recent update() call.  Renderer.draw() reads this to
+        # allocate new Triangle shapes for the offspring.  Cleared at the
+        # START of each update() so tests can inspect it after update().
+        self._sailfish_born: list = []
+
         # Starvation death totals (Stage 8.5 / 8.7).
         self.stats_sardine_starvations: int = 0
         self.stats_sailfish_starvations: int = 0
+
+        # Monotonically increasing count of sailfish born by reproduction.
+        self.stats_sailfish_births: int = 0
 
         # ── Algae respawn side-channel ─────────────────────────────────
         # New Algae objects spawned by the respawn pass this frame.
@@ -215,6 +224,7 @@ class Simulation:
         self._sardines_eaten_ids.clear()
         self._sardines_starved_ids.clear()
         self._sailfish_died_ids.clear()
+        self._sailfish_born.clear()
 
         # 1 — rebuild sardine grid (sardines only)
         self._grid.clear()
@@ -332,6 +342,12 @@ class Simulation:
                     self.sailfish = [sf for sf in self.sailfish if sf not in dying]
                     self.stats_sailfish_starvations += len(dying)
 
+        # Sailfish reproduction: runs after starvation so dying sailfish
+        # don't also reproduce.  threshold=0 disables reproduction.
+        threshold = self.config.sailfish_eat_threshold
+        if threshold > 0 and self.sailfish:
+            self._reproduce_sailfish(threshold)
+
         # ── Algae respawn ─────────────────────────────────────────────
         # Fractional-accumulator pattern: algae_respawn_rate new algae per
         # simulated second, spawned in whole-unit batches.  Pauses when the
@@ -412,6 +428,52 @@ class Simulation:
                 self.sardines.append(offspring)
                 self._sardine_born.append(offspring)
                 self.stats_sardine_births += 1
+
+    def _reproduce_sailfish(self, threshold: int) -> None:
+        """Spawn offspring for every sailfish whose food_counter >= threshold.
+
+        Called from update() after the starvation pass.  Appends new Sailfish
+        objects both to ``self.sailfish`` and ``self._sailfish_born`` (which
+        the renderer reads to allocate matching Triangle shapes).
+
+        Mirrors ``_reproduce_sardines`` exactly: perpendicular offset by one
+        separation radius, inherited velocity, food_counter decremented by
+        threshold (excess carries forward).
+        """
+        from sim.sailfish import Sailfish
+        import math as _math
+
+        cfg      = self.config
+        W        = float(cfg.window_width)
+        H        = float(cfg.window_height)
+        offset_d = cfg.radius_separation
+
+        # Snapshot current list length so newly appended offspring are not
+        # iterated in this same loop (avoid runaway spawning in one frame).
+        n_current = len(self.sailfish)
+        for sailfish in self.sailfish[:n_current]:
+            if sailfish.food_counter >= threshold:
+                sailfish.food_counter -= threshold
+
+                # Perpendicular offset based on current heading.
+                vx = float(sailfish.velocity[0])
+                vy = float(sailfish.velocity[1])
+                mag = _math.sqrt(vx * vx + vy * vy)
+                if mag > 1e-9:
+                    px, py = -vy / mag, vx / mag
+                else:
+                    px, py = 1.0, 0.0  # no heading — offset in +x
+
+                ox = (float(sailfish.position[0]) + px * offset_d) % W
+                oy = (float(sailfish.position[1]) + py * offset_d) % H
+
+                offspring = Sailfish(
+                    ox, oy, vx, vy,
+                    cfg, self._grid,
+                )
+                self.sailfish.append(offspring)
+                self._sailfish_born.append(offspring)
+                self.stats_sailfish_births += 1
 
     def _spawn_algae_batch(self, n: int) -> None:
         """Spawn *n* new Algae objects via the respawn pass.

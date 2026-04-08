@@ -148,7 +148,7 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     _MenuItem("Sailfish speed",  "sailfish_max_speed",      10.0,  50.0,  50.0,  600.0),
     _MenuItem("Sailfish force",  "sailfish_max_force",      10.0,  50.0,  10.0,  600.0),
     _GroupRow("ECOSYSTEM"),
-    
+
     # ─ Algae respawn ──────────────────────────────────────────────
     # Live-effective: ecology pass reads these from self.config each frame.
     _MenuItem("Algae respawn",   "algae_respawn_rate",       0.5,   5.0,   0.0,   75.0),
@@ -162,6 +162,7 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     # ─ Sailfish ecology ─────────────────────────────────────────────
     _MenuItem("Sailfish eat r",  "sailfish_eat_radius",      1.0,   5.0,  10.0,   80.0),
     _MenuItem("Sailfish starve", "sailfish_starvation_time", 5.0,  30.0,   0.0,  600.0),
+    _MenuItem("Sailfish repro",  "sailfish_eat_threshold",   1.0,   5.0,   0.0,   20.0),
     _GroupRow("ALGAE DRIFT"),
     # ─ Algae kinematics / flocking ─────────────────────────────────────
     # Live-effective via apply_config which propagates max_speed/max_force and

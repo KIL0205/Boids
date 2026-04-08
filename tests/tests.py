@@ -2778,5 +2778,256 @@ class TestConfigMenuEcosystem(unittest.TestCase):
         )
 
 
+# ── Stage 8.8: sailfish reproduction ─────────────────────────────────────────
+
+def _make_sailfish_reproduction_sim(
+    *,
+    threshold: int = 5,
+    sailfish_pos: tuple[float, float] = (700.0, 350.0),
+    initial_food: float = 0.0,
+) -> "Simulation":
+    """Return a bare Simulation with one sailfish at a fixed position.
+
+    No sardines, no algae — tests that need eating should manage fish manually.
+    Forces are disabled so the sailfish stays near its spawn point.
+    Starvation is disabled so food_counter tests are not confounded.
+    """
+    from sim.sailfish import Sailfish
+
+    cfg = SimConfig(
+        num_sardines=0,
+        num_sailfish=0,
+        num_algae=0,
+        sailfish_eat_threshold=threshold,
+        sailfish_min_speed=0.0,
+        algae_respawn_rate=0.0,
+        # Disable starvation so tests are purely about reproduction.
+        sardine_starvation_time=0.0,
+        sailfish_starvation_time=0.0,
+        sailfish_initial_hunger_time=0.0,
+        sardine_initial_hunger_time=0.0,
+        # Disable all flocking / pursuit forces.
+        weight_separation=0.0, weight_alignment=0.0,
+        weight_cohesion=0.0, weight_noise=0.0,
+        weight_algae_separation=0.0, weight_algae_alignment=0.0,
+        weight_algae_cohesion=0.0, weight_algae_noise=0.0,
+        weight_pursuit=0.0, weight_flee=0.0,
+    )
+    sim = Simulation(cfg)
+    sf = Sailfish(
+        sailfish_pos[0], sailfish_pos[1],
+        10.0, 0.0,   # small +x velocity so heading is well-defined
+        cfg, sim._grid,
+    )
+    sf.food_counter = initial_food
+    sim.sailfish.append(sf)
+    return sim
+
+
+class TestSailfishReproduction(unittest.TestCase):
+    """Tests for Stage 8.8: sailfish food_counter → offspring spawning."""
+
+    # ── Threshold logic ───────────────────────────────────────────────
+
+    def test_no_reproduction_below_threshold(self):
+        """food_counter < threshold → no offspring spawned."""
+        sim = _make_sailfish_reproduction_sim(threshold=5, initial_food=4.0)
+        sim.update(1 / 60)
+        self.assertEqual(len(sim.sailfish), 1,
+                         "No offspring when food_counter < threshold")
+        self.assertEqual(sim.stats_sailfish_births, 0)
+
+    def test_reproduction_at_exact_threshold(self):
+        """food_counter == threshold → exactly one offspring spawned."""
+        sim = _make_sailfish_reproduction_sim(threshold=5, initial_food=5.0)
+        sim.update(1 / 60)
+        self.assertEqual(len(sim.sailfish), 2,
+                         "Exactly one offspring when food_counter == threshold")
+        self.assertEqual(sim.stats_sailfish_births, 1)
+
+    def test_reproduction_above_threshold(self):
+        """food_counter > threshold → still exactly one offspring per update."""
+        sim = _make_sailfish_reproduction_sim(threshold=5, initial_food=8.0)
+        sim.update(1 / 60)
+        self.assertEqual(len(sim.sailfish), 2,
+                         "One offspring per update, regardless of excess food")
+        self.assertEqual(sim.stats_sailfish_births, 1)
+
+    def test_food_counter_decremented_by_threshold(self):
+        """After reproduction food_counter is decremented by threshold (not reset to 0)."""
+        threshold = 5
+        initial_food = 7.0
+        sim = _make_sailfish_reproduction_sim(threshold=threshold, initial_food=initial_food)
+        parent = sim.sailfish[0]
+        sim.update(1 / 60)
+        self.assertAlmostEqual(
+            parent.food_counter, initial_food - threshold, places=9,
+            msg="food_counter -= threshold preserves leftover progress",
+        )
+
+    def test_food_counter_reset_exactly_at_threshold(self):
+        """food_counter becomes 0 when it was exactly threshold."""
+        sim = _make_sailfish_reproduction_sim(threshold=5, initial_food=5.0)
+        parent = sim.sailfish[0]
+        sim.update(1 / 60)
+        self.assertAlmostEqual(parent.food_counter, 0.0, places=9)
+
+    def test_threshold_zero_disables_reproduction(self):
+        """threshold=0 → no reproduction even with high food_counter."""
+        sim = _make_sailfish_reproduction_sim(threshold=0, initial_food=100.0)
+        sim.update(1 / 60)
+        self.assertEqual(len(sim.sailfish), 1,
+                         "threshold=0 should disable reproduction entirely")
+        self.assertEqual(sim.stats_sailfish_births, 0)
+
+    # ── Offspring validity ────────────────────────────────────────────
+
+    def test_offspring_in_world_bounds(self):
+        """Offspring position is inside [0, W) × [0, H)."""
+        sim = _make_sailfish_reproduction_sim(threshold=1, initial_food=1.0)
+        sim.update(1 / 60)
+        offspring = sim.sailfish[1]
+        W = float(sim.config.window_width)
+        H = float(sim.config.window_height)
+        px, py = float(offspring.position[0]), float(offspring.position[1])
+        self.assertGreaterEqual(px, 0.0)
+        self.assertLess(px, W)
+        self.assertGreaterEqual(py, 0.0)
+        self.assertLess(py, H)
+
+    def test_offspring_has_non_nan_velocity(self):
+        """Offspring velocity components are finite numbers."""
+        sim = _make_sailfish_reproduction_sim(threshold=1, initial_food=1.0)
+        sim.update(1 / 60)
+        offspring = sim.sailfish[1]
+        vx = float(offspring.velocity[0])
+        vy = float(offspring.velocity[1])
+        self.assertTrue(math.isfinite(vx), "offspring vx must be finite")
+        self.assertTrue(math.isfinite(vy), "offspring vy must be finite")
+
+    def test_offspring_different_position_from_parent(self):
+        """Offspring is not stacked exactly on top of the parent."""
+        sim = _make_sailfish_reproduction_sim(threshold=1, initial_food=1.0)
+        parent = sim.sailfish[0]
+        sim.update(1 / 60)
+        offspring = sim.sailfish[1]
+        dx = float(offspring.position[0]) - float(parent.position[0])
+        dy = float(offspring.position[1]) - float(parent.position[1])
+        W = float(sim.config.window_width)
+        H = float(sim.config.window_height)
+        if dx > W / 2:  dx -= W
+        if dx < -W / 2: dx += W
+        if dy > H / 2:  dy -= H
+        if dy < -H / 2: dy += H
+        d = math.sqrt(dx * dx + dy * dy)
+        self.assertGreater(d, 1.0, "Offspring must not be stacked exactly on parent")
+
+    def test_offspring_is_sailfish_instance(self):
+        """Newly born boid is a Sailfish instance."""
+        from sim.sailfish import Sailfish
+        sim = _make_sailfish_reproduction_sim(threshold=1, initial_food=1.0)
+        sim.update(1 / 60)
+        self.assertIsInstance(sim.sailfish[1], Sailfish)
+
+    def test_offspring_food_counter_zero(self):
+        """Offspring starts with food_counter = 0."""
+        sim = _make_sailfish_reproduction_sim(threshold=1, initial_food=1.0)
+        sim.update(1 / 60)
+        offspring = sim.sailfish[1]
+        self.assertEqual(offspring.food_counter, 0.0)
+
+    def test_offspring_hunger_timer_initialized_from_config(self):
+        """Offspring hunger_timer is initialized from sailfish_initial_hunger_time."""
+        sim = _make_sailfish_reproduction_sim(threshold=1, initial_food=1.0)
+        sim.update(1 / 60)
+        offspring = sim.sailfish[1]
+        self.assertAlmostEqual(
+            offspring.hunger_timer, sim.config.sailfish_initial_hunger_time, places=9,
+            msg="Newborn sailfish hunger_timer must equal sailfish_initial_hunger_time",
+        )
+
+    # ── _sailfish_born lifecycle ──────────────────────────────────────
+
+    def test_sailfish_born_populated_on_birth_frame(self):
+        """_sailfish_born contains the offspring immediately after update()."""
+        sim = _make_sailfish_reproduction_sim(threshold=1, initial_food=1.0)
+        sim.update(1 / 60)
+        self.assertEqual(len(sim._sailfish_born), 1)
+        self.assertIs(sim._sailfish_born[0], sim.sailfish[1])
+
+    def test_sailfish_born_cleared_next_frame(self):
+        """_sailfish_born is empty at the start of the next update()."""
+        sim = _make_sailfish_reproduction_sim(threshold=1, initial_food=1.0)
+        sim.update(1 / 60)   # birth frame
+        self.assertTrue(sim._sailfish_born)
+        sim.update(1 / 60)   # next frame — cleared at top of update()
+        self.assertFalse(sim._sailfish_born,
+                         "_sailfish_born must be cleared at the start of each update()")
+
+    def test_stats_sailfish_births_cumulative(self):
+        """stats_sailfish_births accumulates across multiple births."""
+        from sim.sailfish import Sailfish
+        cfg = SimConfig(
+            num_sardines=0, num_sailfish=0, num_algae=0,
+            sailfish_eat_threshold=1,
+            sailfish_min_speed=0.0,
+            sailfish_starvation_time=0.0,
+            sailfish_initial_hunger_time=0.0,
+            sardine_starvation_time=0.0,
+            sardine_initial_hunger_time=0.0,
+            weight_separation=0.0, weight_alignment=0.0,
+            weight_cohesion=0.0, weight_noise=0.0,
+            weight_algae_separation=0.0, weight_algae_alignment=0.0,
+            weight_algae_cohesion=0.0, weight_algae_noise=0.0,
+            weight_pursuit=0.0, weight_flee=0.0,
+        )
+        sim = Simulation(cfg)
+        for _ in range(2):
+            sf = Sailfish(700.0, 350.0, 10.0, 0.0, cfg, sim._grid)
+            sf.food_counter = 1.0
+            sim.sailfish.append(sf)
+        sim.update(1 / 60)
+        self.assertEqual(sim.stats_sailfish_births, 2)
+
+    # ── Integration / stability ───────────────────────────────────────
+
+    def test_repeated_reproduction_does_not_corrupt_simulation(self):
+        """30 frames after one burst of reproduction keep positions bounded and finite."""
+        from sim.sailfish import Sailfish
+        cfg = SimConfig(
+            num_sardines=0,
+            num_sailfish=3,
+            num_algae=0,
+            sailfish_eat_threshold=1,
+            sailfish_min_speed=0.0,
+            sailfish_starvation_time=0.0,
+            sailfish_initial_hunger_time=0.0,
+            sardine_starvation_time=0.0,
+            sardine_initial_hunger_time=0.0,
+            weight_separation=0.0, weight_alignment=0.0,
+            weight_cohesion=0.0, weight_noise=0.0,
+            weight_algae_separation=0.0, weight_algae_alignment=0.0,
+            weight_algae_cohesion=0.0, weight_algae_noise=0.0,
+            weight_pursuit=0.0, weight_flee=0.0,
+        )
+        sim = Simulation(cfg)
+        # Pre-load food once so reproduction triggers only on the first frame.
+        # After that food_counter = 0 on all sailfish; no further births.
+        for sf in sim.sailfish:
+            sf.food_counter = 1.0
+        for _ in range(30):
+            sim.update(1 / 60)
+        W = float(cfg.window_width)
+        H = float(cfg.window_height)
+        for sf in sim.sailfish:
+            px, py = float(sf.position[0]), float(sf.position[1])
+            self.assertTrue(math.isfinite(px) and math.isfinite(py),
+                            "sailfish position must be finite after reproduction")
+            self.assertGreaterEqual(px, 0.0)
+            self.assertLess(px, W)
+            self.assertGreaterEqual(py, 0.0)
+            self.assertLess(py, H)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

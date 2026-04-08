@@ -10,7 +10,7 @@
 A 2D real-time Python simulation of sardine schooling and sailfish predation.
 
 - **Runtime**: `python main.py` — resizable window at screen resolution, 60 fps target.
-- **Tests**: `python -m tests.tests` — 166 tests, ~1.3 s.
+- **Tests**: `python -m tests.tests` — 185 tests, ~1.5 s.
 
 ### Current capabilities
 - Sardines flock using Reynolds separation / alignment / cohesion + small noise term.
@@ -20,6 +20,7 @@ A 2D real-time Python simulation of sardine schooling and sailfish predation.
 - **Sardine feeding**: sardines eat algae on contact (`algae_eat_radius`); eaten algae vanish instantly, sardine `food_counter` and `hunger_timer` tracked.
 - **Sardine reproduction**: when `food_counter` reaches `sardine_eat_threshold`, the sardine splits — one offspring spawned beside it (perpendicular offset = `radius_separation`), inheriting parent velocity; `food_counter` decremented by threshold (not reset to 0) so leftover progress carries forward.
 - **Sailfish predation**: each sailfish eats the nearest sardine within `sailfish_eat_radius` each frame (one per sailfish per tick); the sardine is removed immediately; sailfish `food_counter` and `hunger_timer` track feeding state. HUD shows cumulative predation count (`Pred ↑N`).
+- **Sailfish reproduction**: when a sailfish's `food_counter` reaches `sailfish_eat_threshold` (sardines eaten), it spawns one offspring beside it (perpendicular offset = `radius_separation`), inheriting parent velocity; `food_counter` decremented by threshold (not reset to 0); HUD shows cumulative births.
 - Live window resize and fullscreen toggle (world geometry updates in-place).
 - Runtime config menu (TAB): 25+ parameters editable live across 8 sections; panel scrolls automatically; settings persist across runs.
 - Velocity-based fish colouring: 7 sardine palette modes, 5 sailfish colour modes.
@@ -64,7 +65,7 @@ Boids/
 │
 ├── tests/
 │   ├── __init__.py
-│   └── tests.py              # 169 tests across 14 suites
+│   └── tests.py              # 185 tests across 15 suites
 │
 └── utils/
     ├── __init__.py
@@ -421,7 +422,7 @@ See **Section 10** for the original staged plan (now fully implemented — all s
 ## 9. References
 
 - **[ARCHIVE.md](ARCHIVE.md)** — Phase-by-phase build history, implementation archaeology, subclass interface contract, algorithmic complexity reference, historical tuning table.
-- **[tests/tests.py](tests/tests.py)** — 169 tests across 14 suites: `TestVec2`, `TestBoidKinematics`, `TestSpatialHash`, `TestSimulationIntegrity`, `TestPhase2`, `TestAlgaeKinematics`, `TestEcologyContactDetection`, `TestSardineReproduction`, `TestSailfishEcology`, `TestSardineStarvation`, `TestSailfishStarvation`, `TestAlgaeRespawn`, `TestHudEcosystem`, `TestConfigMenuEcosystem`.
+- **[tests/tests.py](tests/tests.py)** — 185 tests across 15 suites: `TestVec2`, `TestBoidKinematics`, `TestSpatialHash`, `TestSimulationIntegrity`, `TestPhase2`, `TestAlgaeKinematics`, `TestEcologyContactDetection`, `TestSardineReproduction`, `TestSailfishEcology`, `TestSardineStarvation`, `TestSailfishStarvation`, `TestAlgaeRespawn`, `TestHudEcosystem`, `TestConfigMenuEcosystem`, `TestSailfishReproduction`.
 - **[config/config.py](config/config.py)** — Authoritative parameter definitions with inline comments.
 
 ---

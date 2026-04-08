@@ -234,7 +234,8 @@ class Hud:
             f"  starved\u2191{simulation.stats_sardine_starvations}"
             f"  eaten\u2191{simulation.stats_sardines_eaten}"
             f"  avg hunger {sar_hunger}\n"
-            f"Sailfish: starved\u2191{simulation.stats_sailfish_starvations}"
+            f"Sailfish: born\u2191{simulation.stats_sailfish_births}"
+            f"  starved\u2191{simulation.stats_sailfish_starvations}"
             f"  avg hunger {sf_hunger}{color_str}\n"
             f"World {W} \u00d7 {H} px\n"
             f"\u2191/\u2193 sardines (+/-50)  \u2190/\u2192 sailfish (+/-1)  "
@@ -456,6 +457,25 @@ class Renderer:
             for tri in self._sailfish_shapes:
                 tri.color = color
             self._prev_sailfish_mode = sailfish_mode
+
+        # ── Handle sailfish births (reproduction) ─────────────────────────
+        # _sailfish_born contains new Sailfish objects appended to
+        # simulation.sailfish this frame.  Allocate a Triangle for each and
+        # append — keeps _sailfish_shapes in 1-to-1 order with
+        # simulation.sailfish without a full reset().
+        # Guard: skip if a shape already exists for this offspring (protects
+        # against double-processing on reentrant idle() during resize).
+        sf_born = simulation._sailfish_born
+        if sf_born:
+            sf_size_f = float(cfg.sailfish_size)
+            sf_color  = _SAILFISH_COLORS.get(cfg.sailfish_color_mode,
+                                              _SAILFISH_COLOR_DEFAULT)
+            for offspring in sf_born:
+                if id(offspring) not in self._sailfish_shape_map:
+                    tri = self._make_shapes([offspring], sf_size_f, sf_color)[0]
+                    self._sailfish_shapes.append(tri)
+                    self._sailfish_shape_map[id(offspring)] = tri
+
         # ── Handle sailfish deaths (starvation) ────────────────────────────
         # _sailfish_died_ids holds id() values of sailfish that starved this
         # frame.  Delete their Triangle shapes and rebuild _sailfish_shapes so

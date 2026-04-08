@@ -236,6 +236,14 @@ class SimConfig:
     # Increased from 20 → 40 s to match the longer starvation threshold.
     sailfish_initial_hunger_time: float = 40.0
 
+    # ── Sailfish ecology: reproduction (Phase 8.8) ────────────────────
+    # Number of sardines a sailfish must eat before producing one offspring.
+    # Set to 0 to disable sailfish reproduction entirely.
+    # Default of 8: each sardine eaten increments food_counter by 1; with
+    # 8 sailfish hunting actively, at ~1 kill per sailfish every few seconds
+    # a single sailfish reaches threshold roughly every 30–60 seconds.
+    sailfish_eat_threshold: int = 8
+
     # ── Overlay / HUD ─────────────────────────────────────────────────
     # Toggle with the H key at runtime (via Renderer.toggle_hud()).
     show_hud: bool = True
