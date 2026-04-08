@@ -11,11 +11,11 @@ Dynamic palette coloring
 -----------------------
 Sardine color is derived each frame from three per-fish kinematic channels:
 
-* **Heading direction** — maps the fish's travel angle (0–360°) to the
+* **Heading direction** — maps the fish's travel angle (0-360°) to the
   current palette.  Fish swimming in the same direction share the same base
   hue, so an aligned school forms a tight color cluster.
 
-* **Linear speed** — adds a fractional hue offset (up to ¼ wheel) so faster
+* **Linear speed** — adds a fractional hue offset (up to 1/4 wheel) so faster
   fish within the same school shift visibly, giving a speed-cohort signal.
 
 * **Turn rate (rotational velocity)** — reduces saturation as the fish turns.
@@ -73,6 +73,9 @@ if TYPE_CHECKING:
 
 # Sardine default fill colour — silvery blue-white on deep-water background.
 _SARDINE_COLOR: tuple[int, int, int, int] = (210, 240, 230, 255)
+
+# Algae fixed fill colour — reddish-brown, distinct from silver sardines and orange sailfish.
+_ALGAE_COLOR: tuple[int, int, int, int] = (170, 50, 20, 255)
 
 # ── Sailfish per-mode fixed colors ───────────────────────────────────────────
 # Keyed by ``config.sailfish_color_mode``.  All RGBA.
@@ -153,7 +156,7 @@ class Hud:
             font_size=12,
             x=8,
             y=window_height - 8,
-            width=460,
+            width=520,
             multiline=True,
             anchor_y="top",
             color=(220, 220, 220, 210),
@@ -169,7 +172,16 @@ class Hud:
         update_ms: float,
         render_ms: float,
     ) -> None:
-        """Rebuild the label text (rate-limited to _REFRESH seconds)."""
+        """Rebuild the label text (rate-limited to _REFRESH seconds).
+
+        Throttling
+        ----------
+        Population counts, cumulative stats, and average hunger values are
+        all recomputed at most once per _REFRESH interval (default 0.25 s =
+        4 Hz).  The avg-hunger sums iterate over the live agent lists —
+        O(N_sardines + N_sailfish) — but only run 4 times per second, so
+        the cost is negligible (≈1 200 attribute reads/s at N=300).
+        """
         self._frame_count += 1
         now = time.perf_counter()
         if now < self._next_refresh:
@@ -182,22 +194,49 @@ class Hud:
         fps = self._fps
         frame_ms = 1000.0 / fps if fps > 0.5 else 0.0
         try:
-            n_s = len(simulation.sardines)
-            n_f = len(simulation.sailfish)
-            W = simulation.config.window_width
-            H = simulation.config.window_height
-            color_mode = simulation.config.sardine_color_mode
-            color_str  = f" [{color_mode.upper()}]" if color_mode != "white" else ""
-            counts = f"Sardines {n_s}  |  Sailfish {n_f}  |  Total {n_s + n_f}{color_str}"
-            dims = f"World {W} \u00d7 {H} px"
+            cfg      = simulation.config
+            sardines = simulation.sardines
+            sailfish = simulation.sailfish
+            n_s = len(sardines)
+            n_f = len(sailfish)
+            n_a = len(simulation.algae)
+
+            # ── Average hunger (O(N) but only recomputed at 4 Hz) ────────
+            # Shows avg time since last meal vs. current population, giving
+            # an at-a-glance read on how stressed each trophic level is.
+            if sardines:
+                avg_sar = sum(s.hunger_timer for s in sardines) / n_s
+                sar_hunger = f"{avg_sar:.1f}s"
+            else:
+                sar_hunger = "---"
+            if sailfish:
+                avg_sf = sum(sf.hunger_timer for sf in sailfish) / n_f
+                sf_hunger = f"{avg_sf:.1f}s"
+            else:
+                sf_hunger = "---"
+
+            color_mode = cfg.sardine_color_mode
+            color_str  = f"  [{color_mode.upper()}]" if color_mode != "white" else ""
+            W = cfg.window_width
+            H = cfg.window_height
         except Exception:
-            counts = "Sardines n/a  |  Sailfish n/a"
-            dims = "World n/a"
+            self._label.text = "HUD data unavailable"
+            return
+
         self._label.text = (
-            f"FPS {fps:5.1f}  |  Frame {frame_ms:4.1f} ms\n"
-            f"Update {update_ms:5.1f} ms  |  Render {render_ms:4.1f} ms\n"
-            f"{counts}\n"
-            f"{dims}\n"
+            f"FPS {fps:5.1f}  |  Frame {frame_ms:4.1f} ms  |  "
+            f"Update {update_ms:4.1f} ms  |  Render {render_ms:4.1f} ms\n"
+            f"Sardines {n_s}  |  Sailfish {n_f}  |  Algae {n_a}"
+            f"  |  Total {n_s + n_f + n_a}\n"
+            f"Algae: eaten\u2191{simulation.stats_algae_eaten}"
+            f"  spawned\u2191{simulation.stats_algae_spawned}\n"
+            f"Sardines: born\u2191{simulation.stats_sardine_births}"
+            f"  starved\u2191{simulation.stats_sardine_starvations}"
+            f"  eaten\u2191{simulation.stats_sardines_eaten}"
+            f"  avg hunger {sar_hunger}\n"
+            f"Sailfish: starved\u2191{simulation.stats_sailfish_starvations}"
+            f"  avg hunger {sf_hunger}{color_str}\n"
+            f"World {W} \u00d7 {H} px\n"
             f"\u2191/\u2193 sardines (+/-50)  \u2190/\u2192 sailfish (+/-1)  "
             f"F fullscreen  H HUD  V color-mode  TAB config"
         )
@@ -228,8 +267,22 @@ class Renderer:
         self._config = config
         self._window = window
         self._batch: pyglet.graphics.Batch = pyglet.graphics.Batch()
+        self._algae_shapes:   list[pyglet.shapes.Circle]   = []
         self._sardine_shapes: list[pyglet.shapes.Triangle] = []
         self._sailfish_shapes: list[pyglet.shapes.Triangle] = []
+
+        # Maps id(Algae boid) → Circle so eaten algae shapes can be removed
+        # in O(K) without rebuilding the whole algae shape list each frame.
+        self._algae_shape_map: dict[int, pyglet.shapes.Circle] = {}
+
+        # Maps id(Sardine boid) → Triangle and _VelColorState so sardines eaten
+        # by sailfish or starved can be removed in O(K) without rebuilding.
+        self._sardine_shape_map: dict[int, pyglet.shapes.Triangle] = {}
+        self._sardine_vel_map:   dict[int, _VelColorState]         = {}
+
+        # Maps id(Sailfish boid) → Triangle so starved sailfish shapes can be
+        # removed in O(K) without rebuilding the whole sailfish shape list.
+        self._sailfish_shape_map: dict[int, pyglet.shapes.Triangle] = {}
 
         # Per-fish velocity-color state (rebuilt in reset()).
         self._vel_states: list[_VelColorState] = []
@@ -248,11 +301,18 @@ class Renderer:
 
     # ── One-time setup ────────────────────────────────────────────────
 
-    def reset(self, sardines: list["Boid"], sailfish: list["Boid"] | None = None) -> None:
+    def reset(self, sardines: list["Boid"], sailfish: list["Boid"] | None = None, algae: list["Boid"] | None = None) -> None:
         """Build one Triangle shape per agent and register with the batch.
 
         Safe to call more than once: existing shapes are deleted first.
+
+        Algae shapes are created first so they render behind sardines and
+        sailfish in the batch draw order.
         """
+        for shape in self._algae_shapes:
+            shape.delete()
+        self._algae_shapes.clear()
+
         for shape in self._sardine_shapes:
             shape.delete()
         self._sardine_shapes.clear()
@@ -261,6 +321,14 @@ class Renderer:
             shape.delete()
         self._sailfish_shapes.clear()
 
+        # Algae first — drawn behind sardines and sailfish.
+        self._algae_shapes = self._make_algae_shapes(
+            algae or [], float(self._config.algae_size), _ALGAE_COLOR
+        )
+        # Build identity→shape map for O(K) per-frame removal of eaten algae.
+        self._algae_shape_map = {
+            id(a): s for a, s in zip(algae or [], self._algae_shapes)
+        }
         self._sardine_shapes = self._make_shapes(
             sardines, float(self._config.sardine_size), _SARDINE_COLOR
         )
@@ -273,6 +341,16 @@ class Renderer:
 
         # Allocate (or resize) velocity-color state for each sardine.
         self._vel_states = [_VelColorState() for _ in sardines]
+        self._sardine_shape_map = {
+            id(s): shape for s, shape in zip(sardines, self._sardine_shapes)
+        }
+        self._sardine_vel_map = {
+            id(s): vs for s, vs in zip(sardines, self._vel_states)
+        }
+        # Build sailfish identity→shape map for O(K) starvation removal.
+        self._sailfish_shape_map = {
+            id(sf): shape for sf, shape in zip(sailfish or [], self._sailfish_shapes)
+        }
 
     # ── Per-frame draw ────────────────────────────────────────────────
 
@@ -290,6 +368,54 @@ class Renderer:
         # frozen-dataclass fields during every call to _sync_shapes*.
         sardine_size_f  = float(cfg.sardine_size)
         sailfish_size_f = float(cfg.sailfish_size)
+
+        # ── Handle sardine births (reproduction) ─────────────────────────
+        # _sardine_born contains new Sardine objects appended to
+        # simulation.sardines this frame.  Allocate a Triangle + VelColorState
+        # for each and append — keeps _sardine_shapes in 1-to-1 order with
+        # simulation.sardines without a full reset().
+        # Guard: skip if a shape already exists for this offspring.  This
+        # prevents duplicate triangles when update() runs twice before draw()
+        # (reentrant idle() on macOS during resize/fullscreen transitions).
+        born = simulation._sardine_born
+        if born:
+            size_f = float(cfg.sardine_size)
+            for offspring in born:
+                if id(offspring) not in self._sardine_shape_map:
+                    tri = self._make_shapes([offspring], size_f, _SARDINE_COLOR)[0]
+                    vs  = _VelColorState()
+                    self._sardine_shapes.append(tri)
+                    self._vel_states.append(vs)
+                    self._sardine_shape_map[id(offspring)] = tri
+                    self._sardine_vel_map[id(offspring)]   = vs
+
+        # ── Handle sardine deaths (eaten by sailfish OR starved) ───────────────
+        # Both _sardines_eaten_ids (predation) and _sardines_starved_ids
+        # (starvation) are processed here so the renderer always stays in
+        # 1-to-1 alignment with simulation.sardines.
+        eaten_sardine_ids = simulation._sardines_eaten_ids | simulation._sardines_starved_ids
+        if eaten_sardine_ids:
+            for sid in eaten_sardine_ids:
+                shape = self._sardine_shape_map.pop(sid, None)
+                if shape is not None:
+                    shape.delete()
+                self._sardine_vel_map.pop(sid, None)
+            # Lazy rescue: if a sardine exists in simulation.sardines but is
+            # missing from the map (born-notification was cleared by a
+            # reentrant update() before draw() processed it), create its
+            # triangle now so the rebuild never raises KeyError.
+            s_size_f = float(cfg.sardine_size)
+            self._sardine_shapes = []
+            self._vel_states = []
+            for s in simulation.sardines:
+                tri = self._sardine_shape_map.get(id(s))
+                if tri is None:
+                    tri = self._make_shapes([s], s_size_f, _SARDINE_COLOR)[0]
+                    vs  = _VelColorState()
+                    self._sardine_shape_map[id(s)] = tri
+                    self._sardine_vel_map[id(s)]   = vs
+                self._sardine_shapes.append(tri)
+                self._vel_states.append(self._sardine_vel_map[id(s)])
 
         # ── Detect sardine color-mode transitions ─────────────────────────
         if sardine_mode != self._prev_sardine_mode:
@@ -330,10 +456,74 @@ class Renderer:
             for tri in self._sailfish_shapes:
                 tri.color = color
             self._prev_sailfish_mode = sailfish_mode
-
+        # ── Handle sailfish deaths (starvation) ────────────────────────────
+        # _sailfish_died_ids holds id() values of sailfish that starved this
+        # frame.  Delete their Triangle shapes and rebuild _sailfish_shapes so
+        # _sync_shapes stays in 1-to-1 alignment with simulation.sailfish.
+        if simulation._sailfish_died_ids:
+            for sfid in simulation._sailfish_died_ids:
+                shape = self._sailfish_shape_map.pop(sfid, None)
+                if shape is not None:
+                    shape.delete()
+            # Lazy rescue: create triangles for any sailfish missing from the
+            # map (defensive — sailfish have no birth side-channel but keeps
+            # the pattern consistent with sardines and algae).
+            sf_size_f = float(cfg.sailfish_size)
+            sf_color  = _SAILFISH_COLORS.get(cfg.sailfish_color_mode,
+                                              _SAILFISH_COLOR_DEFAULT)
+            self._sailfish_shapes = []
+            for sf in simulation.sailfish:
+                tri = self._sailfish_shape_map.get(id(sf))
+                if tri is None:
+                    tri = self._make_shapes([sf], sf_size_f, sf_color)[0]
+                    self._sailfish_shape_map[id(sf)] = tri
+                self._sailfish_shapes.append(tri)
         _sync_shapes(
             self._sailfish_shapes, simulation.sailfish,
             sailfish_size_f,
+        )
+        # Algae — fixed colour, position-only sync.
+        # Handle newly respawned algae first (mirrors the _sardine_born birth
+        # pattern): allocate a Circle for each new Algae object so the
+        # shapes list stays in 1-to-1 alignment with simulation.algae BEFORE
+        # we process eaten ids.
+        # Guard: skip if a circle already exists (protects against double-
+        # processing when update() runs twice before draw() on macOS during
+        # fullscreen/resize transitions — see renderer crash-fix notes in
+        # PROJECT_LOG.md).
+        algae_size_f = float(cfg.algae_size)
+        algae_born = simulation._algae_born
+        if algae_born:
+            for alga in algae_born:
+                if id(alga) not in self._algae_shape_map:
+                    circle = self._make_algae_shapes([alga], algae_size_f,
+                                                     _ALGAE_COLOR)[0]
+                    self._algae_shapes.append(circle)
+                    self._algae_shape_map[id(alga)] = circle
+
+        # First remove Circle shapes for any algae eaten this frame so the
+        # shapes list stays in 1-to-1 alignment with simulation.algae.
+        eaten_ids = simulation._algae_eaten_ids
+        if eaten_ids:
+            for boid_id in eaten_ids:
+                shape = self._algae_shape_map.pop(boid_id, None)
+                if shape is not None:
+                    shape.delete()
+            # Rebuild with lazy rescue: if a born-notification was cleared by
+            # a reentrant update() before draw() processed it, the alga is
+            # already in simulation.algae but has no circle yet.  Create one
+            # now so the list comprehension never raises KeyError.
+            new_shapes = []
+            for a in simulation.algae:
+                shape = self._algae_shape_map.get(id(a))
+                if shape is None:
+                    shape = self._make_algae_shapes([a], algae_size_f,
+                                                    _ALGAE_COLOR)[0]
+                    self._algae_shape_map[id(a)] = shape
+                new_shapes.append(shape)
+            self._algae_shapes = new_shapes
+        _sync_circle_positions(
+            self._algae_shapes, simulation.algae,
         )
         self._batch.draw()
         self._last_render_ms = (time.perf_counter() - t0) * 1000.0
@@ -371,6 +561,26 @@ class Renderer:
                     float(tip[0]),   float(tip[1]),
                     float(left[0]),  float(left[1]),
                     float(right[0]), float(right[1]),
+                    color=color,
+                    batch=self._batch,
+                )
+            )
+        return shapes
+
+    def _make_algae_shapes(
+        self,
+        agents: list["Boid"],
+        radius: float,
+        color: tuple[int, int, int, int],
+    ) -> list[pyglet.shapes.Circle]:
+        """Allocate one Circle per algae agent in ``self._batch``."""
+        shapes = []
+        for agent in agents:
+            shapes.append(
+                pyglet.shapes.Circle(
+                    float(agent.position[0]),
+                    float(agent.position[1]),
+                    radius,
                     color=color,
                     batch=self._batch,
                 )
@@ -522,6 +732,16 @@ def _sync_shapes_vel_color(
 
         r, g, b = _hsv_to_rgb(hue, sat, value)
         tri.color = (r, g, b, 255)
+
+
+def _sync_circle_positions(
+    shapes: list[pyglet.shapes.Circle],
+    agents: list["Boid"],
+) -> None:
+    """Write current positions into *shapes* (circles) for the next draw call."""
+    for circle, agent in zip(shapes, agents):
+        circle.x = float(agent.position[0])
+        circle.y = float(agent.position[1])
 
 
 def _boid_verts(

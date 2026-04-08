@@ -78,6 +78,12 @@ class Sailfish(Boid):
         self._hw: float = self._W * 0.5
         self._hh: float = self._H * 0.5
 
+        # Ecology: feeding state (Phase 8.6 / 8.7)
+        self.food_counter: float = 0.0   # sardines eaten; carries toward future use
+        # Initialised from config so freshly spawned sailfish don't all die at
+        # the same simulation time (same stagger pattern as sardines).
+        self.hunger_timer: float = config.sailfish_initial_hunger_time
+
     # ── Pursuit behaviour ─────────────────────────────────────────────
 
     def _compute_forces(self) -> None:

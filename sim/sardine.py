@@ -86,6 +86,16 @@ class Sardine(Boid):
         self._sep_r2: float = config.radius_separation ** 2
         self._ali_r2: float = config.radius_alignment  ** 2
 
+        # ── Ecology counters (Phase 8) ────────────────────────────────
+        # food_counter: number of algae eaten; used in Stage 8.4 to trigger
+        # reproduction when it exceeds sardine_eat_threshold.
+        # hunger_timer: seconds elapsed since last algae contact; reset to 0.0
+        # each time the sardine eats.  Initialised from config so freshly
+        # spawned sardines don't all die at the same simulation time.
+        # Used in Stage 8.5 for starvation.
+        self.food_counter: float = 0.0
+        self.hunger_timer: float = config.sardine_initial_hunger_time
+
     # ── Flocking rules ────────────────────────────────────────────────
 
     def _compute_forces(self) -> None:

@@ -24,7 +24,11 @@ class SimConfig:
     target_fps: int = 60
 
     # ── Population ────────────────────────────────────────────────────
-    num_sardines: int = 900
+    # Reduced from 900 to 300 for ecology balance: 900 sardines deplete 500
+    # algae in seconds, leaving no time for reproduction or starvation
+    # dynamics to play out.  300 sardines with respawn creates a sustainable
+    # food cycle.  Increase with ↑ key once you want a pure-flocking view.
+    num_sardines: int = 300
 
     # ── Sardine kinematics ────────────────────────────────────────────
     sardine_max_speed: float = 150.0    # pixels / second (~1.5 m/s if 1 px ≈ 1 cm)
@@ -121,10 +125,116 @@ class SimConfig:
 
     # ── Sardine flee / predator-awareness ─────────────────────────────
     radius_flee: float = 100.0      # px; sailfish within this trigger escape
-    weight_flee: float = 10.0        # must exceed weight_separation (2.0)
+    weight_flee: float = 10.0       # must exceed weight_separation (2.0)
 
     # Cell size for the sailfish-only spatial hash.
     sailfish_cell_size: float = 120.0
+
+    # ── Algae (Phase 8) ───────────────────────────────────────────────
+    # Increased from 500 to 800 for higher initial food density so sardines
+    # can eat before starvation clocks tick down.
+    num_algae: int = 800
+
+    # Algae kinematics — algae drift slowly, driven mostly by alignment.
+    # min_speed is always 0.0 (not a config field); algae can stop completely.
+    # max_force / max_speed ≈ 0.48 — gentle arc, less snappy than sardines (1.0).
+    algae_max_speed: float = 25.0     # px/s; slow drift (~6× slower than sardines)
+    algae_max_force: float = 12.0     # px/s²; gentle steering budget
+
+    # Algae flocking weights — alignment-dominant gives the "current drift" feel.
+    # Tuned so algae form loose drifting streams rather than tight schools:
+    #   - alignment dominant (drives the current)
+    #   - cohesion very weak (loose aggregates; reduced from 0.2 to avoid clumping)
+    #   - separation slightly stronger than cohesion for healthy sep:coh radius ratio
+    #   - noise kept low so drift is smooth, not chaotic
+    weight_algae_separation: float = 0.3
+    weight_algae_alignment:  float = 1.5
+    weight_algae_cohesion:   float = 0.1
+    weight_algae_noise:      float = 0.05
+
+    # Algae perception radii (px).
+    # r_sep < r_ali == r_coh ≤ algae_cell_size.
+    # sep radius raised (12→18) so sep:coh ratio is 1:3 instead of 1:4.6 —
+    # prevents dense clumping without scattering.
+    # Alignment and cohesion share the same radius (55 px) so every cohesion
+    # neighbour also aligns, producing smoother current patches.
+    radius_algae_separation: float = 18.0
+    radius_algae_alignment:  float = 55.0
+    radius_algae_cohesion:   float = 55.0
+
+    # Cell size for the algae-only spatial hash.
+    # Kept > both r_ali and r_coh for a clean 3×3-ring neighbour lookup.
+    algae_cell_size: float = 60.0
+
+    # Visual size — smaller than sardines for the background-layer feel.
+    algae_size: float = 4.0
+
+    # Contact radius used by the ecology pass to detect sardine–algae eating.
+    # A sardine whose centre is within this distance of an algae centre eats it.
+    # Larger than algae_size (4 px) to register contact reliably at 60 fps
+    # even when the sardine passes through the algae in one frame step.
+    algae_eat_radius: float = 14.0
+
+    # Steady-state rate at which new algae are spawned into the world.
+    # Uses a fractional accumulator so non-integer rates (e.g. 3.7/s) work
+    # correctly without bias.  Set to 0.0 to disable respawn entirely
+    # (useful for tests / debugging a finite-resource scenario).
+    algae_respawn_rate: float = 8.0
+
+    # Soft cap on the total algae population.  Respawn is paused while
+    # len(algae) >= algae_max_count so the pool never grows unboundedly
+    # when sardines are absent.  Must be >= num_algae for a sensible
+    # starting state.
+    algae_max_count: int = 1200
+
+    # Number of algae a sardine must consume before it reproduces (splits).
+    # food_counter is decremented by this amount on reproduction so any
+    # "leftover" eating already in progress carries forward.
+    # Lowered from 5 → 3: with 300 sardines and limited algae density,
+    # threshold 5 made reproduction extremely rare.  3 algae is achievable
+    # within a school pass through a well-stocked area.
+    # Set to 0 to disable reproduction entirely (useful for tests/debugging).
+    sardine_eat_threshold: int = 3
+
+    # ── Sardine ecology: starvation (Phase 8.5) ──────────────────────
+    # How long (seconds) a sardine can go without eating before it dies.
+    # Set to 0.0 to disable sardine starvation entirely (useful for tests /
+    # tuning algae or reproduction in isolation).
+    # Increased from 20 → 30 s: gives sardines a full 30-second window to
+    # find algae.  At world size 1400×700 with 800 algae and 300 sardines,
+    # an average sardine should cross an algae patch within ~15 seconds.
+    sardine_starvation_time: float = 30.0
+
+    # Initial value for sardine.hunger_timer at spawn.  Must be strictly less
+    # than sardine_starvation_time so freshly spawned sardines don't die at
+    # t = starvation_time − initial_hunger_time.  Also staggers die-off
+    # timing when sardines go without algae from startup.
+    # Increased from 10 → 15 s to pair with the 30 s starvation time,
+    # giving each sardine 15 seconds of initial runway.
+    sardine_initial_hunger_time: float = 15.0
+
+    # ── Sailfish ecology (Phase 8.6) ──────────────────────────────────
+    # Contact radius for sailfish-sardine eating.  A sailfish whose centre is
+    # within this distance of a sardine centre eats it.  One sardine per
+    # sailfish per frame (prevents mass-kill when a school is discovered).
+    # Widened from 20 → 25 px: at sardine speed ~100 px/s, a 20 px window
+    # means a sardine can pass entirely through the kill zone in one frame;
+    # 25 px provides a reliable contact zone without making prey too easy.
+    sailfish_eat_radius: float = 25.0
+
+    # ── Sailfish ecology: starvation (Phase 8.7) ──────────────────────
+    # How long (seconds) a sailfish can go without eating before it dies.
+    # Longer than sardines — apex predators need more runway between meals.
+    # Set to 0.0 to disable sailfish starvation entirely.
+    # Increased from 45 → 90 s: with a sardine school that may evade for
+    # extended periods, 45 s was too tight.  90 s gives sailfish a realistic
+    # survival window even when sardines are sparse.
+    sailfish_starvation_time: float = 90.0
+
+    # Initial value for sailfish.hunger_timer at spawn.  Must be strictly less
+    # than sailfish_starvation_time.  Staggers the earliest possible death.
+    # Increased from 20 → 40 s to match the longer starvation threshold.
+    sailfish_initial_hunger_time: float = 40.0
 
     # ── Overlay / HUD ─────────────────────────────────────────────────
     # Toggle with the H key at runtime (via Renderer.toggle_hud()).

@@ -46,6 +46,11 @@ _PAD_V:     int = 8     # vertical padding above and below the row list
 _FONT: list[str] = ["Menlo", "Consolas", "Courier New"]
 _FONT_SZ:   int = 13
 
+# Maximum number of rows visible at once.  Panel height is fixed to this
+# count so the overlay stays compact on any window size.  If the total row
+# count exceeds this, the panel scrolls automatically as you navigate.
+_VISIBLE_ROWS: int = 16
+
 # ── Colours ───────────────────────────────────────────────────────────────
 
 _C_BG_RGB:       tuple[int, int, int] = (10,  18,  35)
@@ -142,6 +147,29 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     _MenuItem("Pursuit radius",  "radius_sailfish_awareness",5.0,  50.0,  50.0,  400.0),
     _MenuItem("Sailfish speed",  "sailfish_max_speed",      10.0,  50.0,  50.0,  600.0),
     _MenuItem("Sailfish force",  "sailfish_max_force",      10.0,  50.0,  10.0,  600.0),
+    _GroupRow("ECOSYSTEM"),
+    
+    # ─ Algae respawn ──────────────────────────────────────────────
+    # Live-effective: ecology pass reads these from self.config each frame.
+    _MenuItem("Algae respawn",   "algae_respawn_rate",       0.5,   5.0,   0.0,   75.0),
+    _MenuItem("Algae max",       "algae_max_count",         50.0, 200.0, 100.0, 5000.0),
+    _MenuItem("Algae eat r",     "algae_eat_radius",         1.0,   5.0,   4.0,   50.0),
+    # ─ Sardine ecology ─────────────────────────────────────────────
+    # Repro thresh is an int field — _adjust_value casts new_val to int.
+    # Applies to all sardines immediately because update() reads self.config.
+    _MenuItem("Repro thresh",    "sardine_eat_threshold",    1.0,   5.0,   0.0,   20.0),
+    _MenuItem("Sardine starve",  "sardine_starvation_time",  1.0,  10.0,   0.0,  300.0),
+    # ─ Sailfish ecology ─────────────────────────────────────────────
+    _MenuItem("Sailfish eat r",  "sailfish_eat_radius",      1.0,   5.0,  10.0,   80.0),
+    _MenuItem("Sailfish starve", "sailfish_starvation_time", 5.0,  30.0,   0.0,  600.0),
+    _GroupRow("ALGAE DRIFT"),
+    # ─ Algae kinematics / flocking ─────────────────────────────────────
+    # Live-effective via apply_config which propagates max_speed/max_force and
+    # agent._config to all Algae objects.  Weights read from agent._config
+    # inside _compute_forces each frame.
+    _MenuItem("Algae speed",     "algae_max_speed",          1.0,   5.0,   1.0,  100.0),
+    _MenuItem("Algae align wt",  "weight_algae_alignment",   0.1,   0.5,   0.0,    5.0),
+    _MenuItem("Algae sep wt",    "weight_algae_separation",  0.1,   0.5,   0.0,    5.0),
     _GroupRow("VISUAL"),
     _CycleItem("Sardine color",      "sardine_color_mode",
                ("white", "rainbow", "cool", "warm", "ocean", "sunset", "mono")),
@@ -238,6 +266,7 @@ class ConfigMenu:
         self._dirty:            bool  = False
         self._save_until:       float = 0.0
         self._save_error_until: float = 0.0
+        self._scroll_offset:    int   = 0
 
         # Pyglet objects — None until _build() is called.
         self._bg:         pyglet.shapes.Rectangle | None = None
@@ -254,8 +283,8 @@ class ConfigMenu:
     # ── Geometry ──────────────────────────────────────────────────────
 
     def _panel_h(self) -> int:
-        """Total panel height in pixels."""
-        return _HEADER_H + _PAD_V + _NUM_ROWS * _ROW_H + _PAD_V + _FOOTER_H
+        """Total panel height in pixels (fixed; rows scroll within this window)."""
+        return _HEADER_H + _PAD_V + _VISIBLE_ROWS * _ROW_H + _PAD_V + _FOOTER_H
 
     def _panel_origin(self, win_h: int) -> tuple[int, int]:
         """Bottom-left corner of the panel (pyglet y-up coordinates)."""
@@ -271,6 +300,13 @@ class ConfigMenu:
         """Bottom edge of row *index* in pyglet coords."""
         body_top = panel_y + self._panel_h() - _HEADER_H - _PAD_V
         return body_top - (index + 1) * _ROW_H
+
+    def _ensure_visible(self) -> None:
+        """Clamp _scroll_offset so _selected is always in the visible window."""
+        if self._selected < self._scroll_offset:
+            self._scroll_offset = self._selected
+        elif self._selected >= self._scroll_offset + _VISIBLE_ROWS:
+            self._scroll_offset = self._selected - _VISIBLE_ROWS + 1
 
     # ── Build / teardown ──────────────────────────────────────────────
 
@@ -314,20 +350,19 @@ class ConfigMenu:
         self._ftr_bg.opacity = _C_FTR_ALPHA
 
         # ── Cursor highlight bar + left-edge accent ────────────────────
+        _visible_sel = self._selected - self._scroll_offset
+        _cursor_y = (
+            self._row_bottom_y(py, _visible_sel)
+            if 0 <= _visible_sel < _VISIBLE_ROWS
+            else -9999
+        )
         self._cursor_bar = pyglet.shapes.Rectangle(
-            px,
-            self._row_bottom_y(py, self._selected),
-            _PANEL_W,
-            _ROW_H,
-            color=_C_CURSOR_RGB,
+            px, _cursor_y, _PANEL_W, _ROW_H, color=_C_CURSOR_RGB,
         )
         self._cursor_bar.opacity = _C_CURSOR_ALPHA
 
         self._sel_bar = pyglet.shapes.Rectangle(
-            px,
-            self._row_bottom_y(py, self._selected),
-            3, _ROW_H,
-            color=(100, 160, 255),
+            px, _cursor_y, 3, _ROW_H, color=(100, 160, 255),
         )
         self._sel_bar.opacity = 230
 
@@ -376,13 +411,19 @@ class ConfigMenu:
                 lbl_text  = _row_text(item, cfg, sel)
                 lbl_color = _C_ROW_SEL if sel else _C_ROW_DIM
                 fs        = _FONT_SZ
+            visible_idx = i - self._scroll_offset
+            row_y = (
+                self._row_center_y(py, visible_idx)
+                if 0 <= visible_idx < _VISIBLE_ROWS
+                else -9999
+            )
             self._row_labels.append(
                 pyglet.text.Label(
                     lbl_text,
                     font_name=_FONT,
                     font_size=fs,
                     x=px + 10,
-                    y=self._row_center_y(py, i),
+                    y=row_y,
                     anchor_y="center",
                     color=lbl_color,
                 )
@@ -415,10 +456,15 @@ class ConfigMenu:
         _, py = self._panel_origin(self._window.height)
         cfg   = self._simulation.config
 
-        # Cursor bar + left-edge accent
-        row_y = self._row_bottom_y(py, self._selected)
-        self._cursor_bar.y = row_y
-        self._sel_bar.y    = row_y
+        # Cursor bar + left-edge accent (hidden when selection scrolls off-screen)
+        visible_sel = self._selected - self._scroll_offset
+        if 0 <= visible_sel < _VISIBLE_ROWS:
+            row_y = self._row_bottom_y(py, visible_sel)
+            self._cursor_bar.y = row_y
+            self._sel_bar.y    = row_y
+        else:
+            self._cursor_bar.y = -9999
+            self._sel_bar.y    = -9999
 
         # Header (may show save feedback or error)
         save_state = self._save_row_state()
@@ -429,13 +475,30 @@ class ConfigMenu:
             _C_HDR_TEXT
         )
 
-        # Footer hint for the selected row
-        self._ftr_label.text = _footer_text(_ROWS[self._selected])
+        # Footer hint: selected-row hint + optional scroll indicator
+        can_up   = self._scroll_offset > 0
+        can_down = self._scroll_offset + _VISIBLE_ROWS < _NUM_ROWS
+        row_hint = _footer_text(_ROWS[self._selected])
+        if can_up and can_down:
+            scroll_hint = "  \u25b2\u25bc"
+        elif can_up:
+            scroll_hint = "  \u25b2"
+        elif can_down:
+            scroll_hint = "  \u25bc"
+        else:
+            scroll_hint = ""
+        self._ftr_label.text = row_hint + scroll_hint
 
-        # Row labels
+        # Row labels — update text, colour, and y position (scroll may shift rows)
         for i, item in enumerate(_ROWS):
             sel = (i == self._selected)
             lbl = self._row_labels[i]
+            visible_idx = i - self._scroll_offset
+            lbl.y = (
+                self._row_center_y(py, visible_idx)
+                if 0 <= visible_idx < _VISIBLE_ROWS
+                else -9999
+            )
             if isinstance(item, _GroupRow):
                 pass  # group headers are static — text and colour never change
             elif isinstance(item, _SaveRow):
@@ -469,6 +532,7 @@ class ConfigMenu:
             while isinstance(_ROWS[new], _GroupRow):
                 new = (new - 1) % _NUM_ROWS
             self._selected = new
+            self._ensure_visible()
             self._dirty = True
             return True
 
@@ -477,6 +541,7 @@ class ConfigMenu:
             while isinstance(_ROWS[new], _GroupRow):
                 new = (new + 1) % _NUM_ROWS
             self._selected = new
+            self._ensure_visible()
             self._dirty = True
             return True
 
@@ -552,16 +617,21 @@ class ConfigMenu:
 
     def _adjust_value(self, symbol: int, modifiers: int) -> None:
         """Change the selected numeric config field by one step and propagate live."""
-        item  = _ROWS[self._selected]
-        cfg   = self._simulation.config
-        cur   = float(getattr(cfg, item.field))
-        step  = item.coarse if (modifiers & Key.MOD_SHIFT) else item.step
-        delta = step if symbol == Key.RIGHT else -step
+        item      = _ROWS[self._selected]
+        cfg       = self._simulation.config
+        cur_typed = getattr(cfg, item.field)
+        cur       = float(cur_typed)
+        step      = item.coarse if (modifiers & Key.MOD_SHIFT) else item.step
+        delta     = step if symbol == Key.RIGHT else -step
 
         new_val = round(max(item.min_val, min(item.max_val, cur + delta)), 6)
 
         if new_val == cur:
             return   # already at boundary
+
+        # Cast back to int for int config fields (avoids TypeError on frozen dataclass).
+        if isinstance(cur_typed, int):
+            new_val = int(new_val)
 
         new_cfg = dataclasses.replace(cfg, **{item.field: new_val})
         self._simulation.apply_config(new_cfg)
