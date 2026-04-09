@@ -71,6 +71,26 @@ class Boid:
         # check.  Updated by Simulation.resize() and Simulation.apply_config().
         self._W: float = float(config.window_width)
         self._H: float = float(config.window_height)
+        # Pre-computed boundary mode flag: avoids an attribute chain + string
+        # comparison on every agent every frame.  Updated by apply_config().
+        self._boundary_wrap: bool = (config.boundary == "wrap")
+        # Grid-cached position and velocity — written by SpatialHash.insert()
+        # once per agent per frame (during grid rebuild, before any agent
+        # update runs).  Storing Python floats here lets ALL downstream
+        # neighbour-loop arithmetic stay in CPython's native float path instead
+        # of going through numpy's scalar type-dispatch machinery on every
+        # opos[0] / ovel[0] access.  Query inner loops and species
+        # _compute_forces() inner loops all read these instead of accessing
+        # other.position[0] / other.velocity[0] directly.
+        self._gx:  float = 0.0   # position x  (set by insert() each frame)
+        self._gy:  float = 0.0   # position y
+        self._gvx: float = 0.0   # velocity vx
+        self._gvy: float = 0.0   # velocity vy
+        # Batch-array index — set by Simulation at the start of each frame
+        # during the Phase 4A array-populate pass.  Used by _batch_integrate_*
+        # to address this agent's row in the shared position/velocity arrays.
+        # Default -1 means "not yet assigned".
+        self._idx:  int  = -1
 
     # ── Public helpers ────────────────────────────────────────────────
 
@@ -107,20 +127,35 @@ class Boid:
         Zero-allocation fast path used by Sardine and Sailfish hot loops.
         Equivalent to ``apply_force(steer_toward([tx,ty]) * weight)`` but
         avoids all intermediate numpy array creation.
+
+        Attribute caching
+        -----------------
+        ``self.velocity``, ``self.max_force``, and ``self.acceleration`` are
+        each read once into a local name.  This eliminates 2–3 repeated
+        LOAD_ATTR + array-index ops per call that occurred when the same
+        attribute was read twice (before vs. after the magnitude clamp).
+        With 3–5 calls per sardine per frame, the savings compound quickly.
         """
         mag = math.sqrt(tx * tx + ty * ty)
         if mag < _EPS_F:
             return
+        vel     = self.velocity           # one LOAD_ATTR covers both vel[0] + vel[1]
+        max_f   = self.max_force          # cache: avoids double-lookup in clamp branch
         inv_mag = self.max_speed / mag
-        sx = tx * inv_mag - float(self.velocity[0])
-        sy = ty * inv_mag - float(self.velocity[1])
+        # float() converts numpy array elements to Python floats so all subsequent
+        # arithmetic (sx*sx, fmag comparison, sx*weight) runs in CPython's native
+        # float path instead of numpy's scalar dispatch machinery (2–4× faster).
+        # Caching vel= above still saves one LOAD_ATTR vs reading self.velocity twice.
+        sx = tx * inv_mag - float(vel[0])
+        sy = ty * inv_mag - float(vel[1])
         fmag = math.sqrt(sx * sx + sy * sy)
-        if fmag > self.max_force:
-            inv_fmag = self.max_force / fmag
+        if fmag > max_f:
+            inv_fmag = max_f / fmag
             sx *= inv_fmag
             sy *= inv_fmag
-        self.acceleration[0] += sx * weight
-        self.acceleration[1] += sy * weight
+        acc     = self.acceleration       # one LOAD_ATTR covers both acc[0] + acc[1]
+        acc[0] += sx * weight
+        acc[1] += sy * weight
 
     # ── Update ────────────────────────────────────────────────────────
 
@@ -133,13 +168,22 @@ class Boid:
         """
         self._compute_forces()
 
-        # Euler integration
-        self.velocity  += self.acceleration * dt
+        # Euler integration — element-wise scalar ops avoid two temporary
+        # (2,) float64 array allocations that `v += a*dt` / `p += v*dt`
+        # would create.  At 2 000 agents × 60 fps that saves ~240 000 small
+        # heap allocations per second with no change in numerical behaviour.
+        acc = self.acceleration
+        vel = self.velocity
+        vel[0] += acc[0] * dt
+        vel[1] += acc[1] * dt
         self._clamp_speed()
-        self.position  += self.velocity * dt
+        pos = self.position
+        pos[0] += vel[0] * dt
+        pos[1] += vel[1] * dt
 
-        # Reset acceleration every frame
-        self.acceleration[:] = 0.0
+        # Reset acceleration in-place (element assignment, no alloc).
+        acc[0] = 0.0
+        acc[1] = 0.0
 
         self._apply_boundary()
 
@@ -184,7 +228,7 @@ class Boid:
         W = self._W
         H = self._H
 
-        if self._config.boundary == "wrap":
+        if self._boundary_wrap:
             wrap_position(self.position, W, H)
         else:
             # "clamp" — reflect off edges

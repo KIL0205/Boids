@@ -105,8 +105,11 @@ class Sailfish(Boid):
         H   = self._H
         hw  = self._hw
         hh  = self._hh
-        px  = float(self.position[0])
-        py  = float(self.position[1])
+        # Cache array ref once, then convert to Python floats for fast native
+        # float arithmetic in the COM loop.
+        _pos = self.position
+        px   = float(_pos[0])
+        py   = float(_pos[1])
 
         sardines = self._sardine_grid.query(self, cfg.radius_sailfish_awareness)
         if not sardines:
@@ -115,8 +118,8 @@ class Sailfish(Boid):
         # Toroidal COM offset — float accumulators avoid np.zeros(2) + divide.
         cx = cy = 0.0
         for s in sardines:
-            dx = float(s.position[0]) - px
-            dy = float(s.position[1]) - py
+            dx = s._gx - px    # pre-cached Python float from insert()
+            dy = s._gy - py
             if dx > hw:    dx -= W
             elif dx < -hw: dx += W
             if dy > hh:    dy -= H

@@ -81,8 +81,10 @@ class Algae(Boid):
         self._H:      float = float(config.window_height)
         self._hw:     float = self._W * 0.5
         self._hh:     float = self._H * 0.5
-        self._sep_r2: float = config.radius_algae_separation ** 2
-        self._ali_r2: float = config.radius_algae_alignment  ** 2
+        self._sep_r2:   float = config.radius_algae_separation ** 2
+        self._ali_r2:   float = config.radius_algae_alignment  ** 2
+        self._coh_r2:   float = config.radius_algae_cohesion   ** 2
+        self._coh_span: int   = max(1, math.ceil(config.radius_algae_cohesion / grid.cell_size))
 
     # ── Flocking rules ────────────────────────────────────────────────
 
@@ -106,62 +108,175 @@ class Algae(Boid):
         H   = self._H
         hw  = self._hw
         hh  = self._hh
-        px  = float(self.position[0])
-        py  = float(self.position[1])
+        # Cache array ref once, then convert to Python floats for fast native
+        # float arithmetic in the neighbour loop (same rationale as sardine.py).
+        _pos = self.position
+        px   = float(_pos[0])
+        py   = float(_pos[1])
 
-        neighbors = self._grid.query(self, cfg.radius_algae_cohesion)
+        # ── Flocking rules — inline cell traversal ─────────────────────────
+        # Same optimisation as sardine._compute_forces(): walk the spatial grid
+        # cells directly so we avoid allocating a neighbour list and avoid a
+        # second pass that recomputes dx/dy/d_sq for every accepted neighbour.
+        # Slow path (tiny worlds / tests) falls back to query() + loop.
+        sep_r2 = self._sep_r2
+        ali_r2 = self._ali_r2
+        coh_r2 = self._coh_r2
 
-        if neighbors:
-            sep_r2 = self._sep_r2
-            ali_r2 = self._ali_r2
+        # Float-pair accumulators — avoids np.zeros(2) allocations.
+        sx = sy = 0.0    # separation: weighted unit away-vectors
+        alx = aly = 0.0  # alignment:  sum of neighbour velocities
+        cx = cy = 0.0    # cohesion:   vector toward group centre
+        sep_count = ali_count = coh_count = 0
 
-            # Float-pair accumulators — avoids np.zeros(2) allocations.
-            sx = sy = 0.0    # separation: weighted unit away-vectors
-            alx = aly = 0.0  # alignment:  sum of neighbour velocities
-            cx = cy = 0.0    # cohesion:   vector toward group centre
-            sep_count = ali_count = coh_count = 0
+        _grid  = self._grid
+        _cells = _grid._cells
+        _cs    = _grid.cell_size
+        _nc    = _grid._num_cols
+        _nr    = _grid._num_rows
+        _span  = self._coh_span
+        _col_c = int(px // _cs)
+        _row_c = int(py // _cs)
 
-            for other in neighbors:
-                dx = px - float(other.position[0])
-                dy = py - float(other.position[1])
-                # Inline toroidal wrap.
+        if _nc > 2 * _span and _nr > 2 * _span:
+            for _dc in range(-_span, _span + 1):
+                _col = (_col_c + _dc) % _nc
+                for _dr in range(-_span, _span + 1):
+                    _cell = _cells.get((_col, (_row_c + _dr) % _nr))
+                    if _cell is None:
+                        continue
+                    for other in _cell:
+                        if other is self:
+                            continue
+                        dx = px - other._gx    # pre-cached Python float from insert()
+                        dy = py - other._gy
+                        # Inline toroidal wrap.
+                        if dx > hw:    dx -= W
+                        elif dx < -hw: dx += W
+                        if dy > hh:    dy -= H
+                        elif dy < -hh: dy += H
+                        d_sq = dx * dx + dy * dy
+                        if d_sq > coh_r2:
+                            continue
+
+                        # ── Separation ────────────────────────────────────────
+                        if d_sq < sep_r2:
+                            if d_sq > _EPS2:
+                                inv_d = 1.0 / math.sqrt(d_sq)
+                                sx += dx * inv_d
+                                sy += dy * inv_d
+                            sep_count += 1
+
+                        # ── Alignment ─────────────────────────────────────────
+                        if d_sq < ali_r2:
+                            alx += other._gvx   # pre-cached velocity from insert()
+                            aly += other._gvy
+                            ali_count += 1
+
+                        # ── Cohesion ──────────────────────────────────────────
+                        cx -= dx
+                        cy -= dy
+                        coh_count += 1
+        else:
+            # Slow path (tiny worlds / tests) — use query() for correctness.
+            for other in _grid.query(self, cfg.radius_algae_cohesion):
+                dx = px - other._gx
+                dy = py - other._gy
                 if dx > hw:    dx -= W
                 elif dx < -hw: dx += W
                 if dy > hh:    dy -= H
                 elif dy < -hh: dy += H
                 d_sq = dx * dx + dy * dy
 
-                # ── Separation ────────────────────────────────────────
                 if d_sq < sep_r2:
                     if d_sq > _EPS2:
                         inv_d = 1.0 / math.sqrt(d_sq)
                         sx += dx * inv_d
                         sy += dy * inv_d
                     sep_count += 1
-
-                # ── Alignment ─────────────────────────────────────────
                 if d_sq < ali_r2:
-                    alx += float(other.velocity[0])
-                    aly += float(other.velocity[1])
+                    alx += other._gvx
+                    aly += other._gvy
                     ali_count += 1
-
-                # ── Cohesion ──────────────────────────────────────────
                 cx -= dx
                 cy -= dy
                 coh_count += 1
 
-            if sep_count:
-                self._steer_apply_xy(sx, sy, cfg.weight_algae_separation)
-            if ali_count:
-                self._steer_apply_xy(alx, aly, cfg.weight_algae_alignment)
-            if coh_count:
-                self._steer_apply_xy(cx, cy, cfg.weight_algae_cohesion)
+        if coh_count:
+            # Inline Reynolds steer for all three flocking directions.
+            # Cache velocity / force limits once; reuse across all directions.
+            _vel = self.velocity
+            _vx  = float(_vel[0])
+            _vy  = float(_vel[1])
+            _ms  = self.max_speed
+            _mf  = self.max_force
+            _acc = self.acceleration
 
-        # ── Noise: fires even without neighbours ──────────────────────
+            if sep_count:
+                _mag = math.sqrt(sx * sx + sy * sy)
+                if _mag > 1e-9:
+                    _inv = _ms / _mag
+                    _stx = sx * _inv - _vx
+                    _sty = sy * _inv - _vy
+                    _fm  = math.sqrt(_stx * _stx + _sty * _sty)
+                    if _fm > _mf:
+                        _k = _mf / _fm
+                        _stx *= _k
+                        _sty *= _k
+                    _w = cfg.weight_algae_separation
+                    _acc[0] += _stx * _w
+                    _acc[1] += _sty * _w
+
+            if ali_count:
+                _mag = math.sqrt(alx * alx + aly * aly)
+                if _mag > 1e-9:
+                    _inv = _ms / _mag
+                    _stx = alx * _inv - _vx
+                    _sty = aly * _inv - _vy
+                    _fm  = math.sqrt(_stx * _stx + _sty * _sty)
+                    if _fm > _mf:
+                        _k = _mf / _fm
+                        _stx *= _k
+                        _sty *= _k
+                    _w = cfg.weight_algae_alignment
+                    _acc[0] += _stx * _w
+                    _acc[1] += _sty * _w
+
+            _mag = math.sqrt(cx * cx + cy * cy)
+            if _mag > 1e-9:
+                _inv = _ms / _mag
+                _stx = cx * _inv - _vx
+                _sty = cy * _inv - _vy
+                _fm  = math.sqrt(_stx * _stx + _sty * _sty)
+                if _fm > _mf:
+                    _k = _mf / _fm
+                    _stx *= _k
+                    _sty *= _k
+                _w = cfg.weight_algae_cohesion
+                _acc[0] += _stx * _w
+                _acc[1] += _sty * _w
+
+        # ── Noise: fires even without neighbours ────────────────────────────
         # random.gauss(0, 1) returns a Python float — zero allocation.
         if cfg.weight_algae_noise > 0.0:
-            self._steer_apply_xy(
-                random.gauss(0.0, 1.0),
-                random.gauss(0.0, 1.0),
-                cfg.weight_algae_noise,
-            )
+            _nx = random.gauss(0.0, 1.0)
+            _ny = random.gauss(0.0, 1.0)
+            _mag = math.sqrt(_nx * _nx + _ny * _ny)
+            if _mag > 1e-9:
+                _vel = self.velocity
+                _vx  = float(_vel[0])
+                _vy  = float(_vel[1])
+                _ms  = self.max_speed
+                _mf  = self.max_force
+                _inv = _ms / _mag
+                _stx = _nx * _inv - _vx
+                _sty = _ny * _inv - _vy
+                _fm  = math.sqrt(_stx * _stx + _sty * _sty)
+                if _fm > _mf:
+                    _k = _mf / _fm
+                    _stx *= _k
+                    _sty *= _k
+                _w = cfg.weight_algae_noise
+                _acc = self.acceleration
+                _acc[0] += _stx * _w
+                _acc[1] += _sty * _w

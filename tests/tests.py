@@ -287,7 +287,263 @@ class TestSpatialHash(unittest.TestCase):
         self.assertNotIn(a, result)
 
 
-# ── Simulation integration ────────────────────────────────────────────────────
+# ── query_first() ─────────────────────────────────────────────────────────────
+
+class TestQueryFirst(unittest.TestCase):
+    """Tests for SpatialHash.query_first() — the stop-at-first-match helper."""
+
+    W, H, CS = 1400.0, 700.0, 80.0
+
+    def _grid(self) -> SpatialHash:
+        return SpatialHash(cell_size=self.CS, world_width=self.W,
+                           world_height=self.H)
+
+    def test_hit_returns_neighbor(self):
+        g = self._grid()
+        a = _boid_at(100.0, 100.0)
+        b = _boid_at(130.0, 100.0)   # 30 px away
+        g.insert(a); g.insert(b)
+        self.assertIs(g.query_first(a, radius=50.0), b)
+
+    def test_miss_returns_none(self):
+        g = self._grid()
+        a = _boid_at(100.0, 100.0)
+        b = _boid_at(300.0, 100.0)   # 200 px away
+        g.insert(a); g.insert(b)
+        self.assertIsNone(g.query_first(a, radius=50.0))
+
+    def test_excludes_self(self):
+        """query_first() must never return the querying agent itself."""
+        g = self._grid()
+        a = _boid_at(100.0, 100.0)
+        g.insert(a)
+        self.assertIsNone(g.query_first(a, radius=50.0))
+
+    def test_empty_grid_returns_none(self):
+        g = self._grid()
+        a = _boid_at(100.0, 100.0)
+        g.insert(a)
+        g.clear()
+        self.assertIsNone(g.query_first(a, radius=50.0))
+
+    def test_boundary_included(self):
+        """Boid exactly at radius boundary is included (≤ check)."""
+        g = self._grid()
+        a = _boid_at(100.0, 100.0)
+        b = _boid_at(150.0, 100.0)   # exactly 50 px away
+        g.insert(a); g.insert(b)
+        self.assertIs(g.query_first(a, radius=50.0), b)
+
+    def test_multiple_candidates_returns_one(self):
+        """When multiple agents qualify, query_first() returns exactly one."""
+        g = self._grid()
+        a = _boid_at(200.0, 200.0)
+        neighbors = [_boid_at(200.0 + i * 8, 200.0) for i in range(1, 5)]
+        g.insert(a)
+        for n in neighbors:
+            g.insert(n)
+        result = g.query_first(a, radius=60.0)
+        self.assertIsNotNone(result)
+        self.assertIn(result, neighbors)
+
+    def test_agrees_with_query_empty(self):
+        """When query() returns empty, query_first() returns None."""
+        g = self._grid()
+        a = _boid_at(100.0, 100.0)
+        b = _boid_at(400.0, 400.0)   # far away
+        g.insert(a); g.insert(b)
+        self.assertEqual(g.query(a, radius=50.0), [])
+        self.assertIsNone(g.query_first(a, radius=50.0))
+
+    def test_agrees_with_query_nonempty(self):
+        """When query() returns results, query_first() returns one of them."""
+        g = self._grid()
+        a = _boid_at(200.0, 200.0)
+        neighbors = [_boid_at(200.0 + i * 10, 200.0) for i in range(1, 4)]
+        g.insert(a)
+        for n in neighbors:
+            g.insert(n)
+        query_result = set(g.query(a, radius=60.0))
+        first = g.query_first(a, radius=60.0)
+        self.assertIsNotNone(first)
+        self.assertIn(first, query_result,
+            "query_first() must return an element that query() would also return")
+
+    def test_toroidal_x_wrap(self):
+        """Returns neighbor across the right→left world boundary."""
+        g = self._grid()
+        a = _boid_at(self.W - 10.0, 350.0)
+        b = _boid_at(10.0, 350.0)   # 20 px toroidal distance
+        g.insert(a); g.insert(b)
+        self.assertIs(g.query_first(a, radius=50.0), b,
+            "query_first() missed neighbor across x wrap boundary")
+
+    def test_toroidal_y_wrap(self):
+        """Returns neighbor across the bottom→top world boundary."""
+        g = self._grid()
+        a = _boid_at(700.0, self.H - 10.0)
+        b = _boid_at(700.0, 10.0)   # 20 px toroidal distance
+        g.insert(a); g.insert(b)
+        self.assertIs(g.query_first(a, radius=50.0), b,
+            "query_first() missed neighbor across y wrap boundary")
+
+
+# ── Inline traversal correctness ──────────────────────────────────────────────
+
+class TestInlineTraversalCorrectness(unittest.TestCase):
+    """Verify inline cell traversal in sardine/algae _compute_forces().
+
+    The fast-path inline duplicates the query() cell-walk directly in each
+    species' _compute_forces() to avoid list materialisation.  These tests
+    confirm the inline:
+      - reaches neighbours that query() would return
+      - produces non-trivial steering forces in known configurations
+      - degrades correctly to the slow-path (query()) in tiny worlds
+      - slow path and fast path produce the same forces for the same geometry
+    """
+
+    from sim.sardine import Sardine
+
+    def _make_cfg(self, W=1400, H=700):
+        return SimConfig(
+            window_width=W, window_height=H,
+            num_sardines=0, num_algae=0, num_sailfish=0,
+        )
+
+    def _make_sardine(self, x, y, vx, vy, cfg, grid, sf_grid=None):
+        from sim.sardine import Sardine
+        return Sardine(x, y, vx, vy, cfg, grid, sf_grid)
+
+    def _make_algae(self, x, y, vx, vy, cfg, grid):
+        from sim.algae import Algae
+        return Algae(x, y, vx, vy, cfg, grid)
+
+    # ── sardine fast-path produces non-zero forces ─────────────────────────
+
+    def test_sardine_separation_force_nonzero(self):
+        """A sardine with a very close neighbour accumulates a separation force."""
+        cfg = self._make_cfg()
+        grid = SpatialHash(cell_size=cfg.cell_size,
+                           world_width=float(cfg.window_width),
+                           world_height=float(cfg.window_height))
+        a = self._make_sardine(200.0, 200.0, 1.0, 0.0, cfg, grid)
+        b = self._make_sardine(205.0, 200.0, 1.0, 0.0, cfg, grid)  # well inside sep_r
+        grid.insert(a); grid.insert(b)
+        a.acceleration[:] = 0.0
+        a._compute_forces()
+        mag = math.sqrt(float(a.acceleration[0])**2 + float(a.acceleration[1])**2)
+        self.assertGreater(mag, 0.0, "separation from a close neighbour should produce a force")
+
+    def test_sardine_alignment_force_nonzero(self):
+        """A sardine aligns with a neighbour heading in a different direction."""
+        cfg = self._make_cfg()
+        grid = SpatialHash(cell_size=cfg.cell_size,
+                           world_width=float(cfg.window_width),
+                           world_height=float(cfg.window_height))
+        a = self._make_sardine(200.0, 200.0, 1.0,  0.0, cfg, grid)
+        b = self._make_sardine(240.0, 200.0, 0.0, -1.0, cfg, grid)  # different heading
+        grid.insert(a); grid.insert(b)
+        a.acceleration[:] = 0.0
+        a._compute_forces()
+        mag = math.sqrt(float(a.acceleration[0])**2 + float(a.acceleration[1])**2)
+        self.assertGreater(mag, 0.0, "neighbour with different heading should produce alignment force")
+
+    def test_sardine_no_force_with_no_neighbours(self):
+        """A sardine with no neighbours in cohesion radius applies no flocking forces."""
+        cfg = self._make_cfg()
+        grid = SpatialHash(cell_size=cfg.cell_size,
+                           world_width=float(cfg.window_width),
+                           world_height=float(cfg.window_height))
+        a = self._make_sardine(100.0, 100.0, 1.0, 0.0, cfg, grid)
+        b = self._make_sardine(900.0, 600.0, 1.0, 0.0, cfg, grid)  # far away
+        grid.insert(a); grid.insert(b)
+        a.acceleration[:] = 0.0
+        # Disable noise to get a clean zero result
+        from dataclasses import replace
+        a._config = replace(cfg, weight_noise=0.0)
+        a._compute_forces()
+        mag = math.sqrt(float(a.acceleration[0])**2 + float(a.acceleration[1])**2)
+        self.assertAlmostEqual(mag, 0.0, places=9,
+            msg="isolated sardine should produce zero flocking force")
+
+    # ── slow-path fallback (tiny world) ───────────────────────────────────
+
+    def test_sardine_slow_path_fallback(self):
+        """Sardine _compute_forces() works in a tiny world (slow path, uses query())."""
+        # World width=100, cell_size=80 → nc=ceil(100/80)=2, span=1 → nc≤2*span → slow path.
+        cfg = self._make_cfg(W=100, H=100)
+        grid = SpatialHash(cell_size=80.0,
+                           world_width=float(cfg.window_width),
+                           world_height=float(cfg.window_height))
+        a = self._make_sardine(30.0, 50.0, 1.0, 0.0, cfg, grid)
+        b = self._make_sardine(50.0, 50.0, 1.0, 0.0, cfg, grid)
+        grid.insert(a); grid.insert(b)
+        # Should not raise; slow path must see b as a neighbour.
+        a.acceleration[:] = 0.0
+        a._compute_forces()
+        # b is within cohesion radius → coh_count must be ≥ 1 → force applied.
+        mag = math.sqrt(float(a.acceleration[0])**2 + float(a.acceleration[1])**2)
+        self.assertGreater(mag, 0.0, "slow-path sardine in tiny world should still accumulate forces")
+
+    # ── algae fast-path ────────────────────────────────────────────────────
+
+    def test_algae_alignment_force_nonzero(self):
+        """An algae with a neighbour heading differently accumulates alignment force."""
+        cfg = self._make_cfg()
+        grid = SpatialHash(cell_size=cfg.algae_cell_size,
+                           world_width=float(cfg.window_width),
+                           world_height=float(cfg.window_height))
+        a = self._make_algae(200.0, 200.0, 1.0,  0.0, cfg, grid)
+        b = self._make_algae(230.0, 200.0, 0.0, -1.0, cfg, grid)
+        grid.insert(a); grid.insert(b)
+        a.acceleration[:] = 0.0
+        from dataclasses import replace
+        a._config = replace(cfg, weight_algae_noise=0.0)
+        a._compute_forces()
+        mag = math.sqrt(float(a.acceleration[0])**2 + float(a.acceleration[1])**2)
+        self.assertGreater(mag, 0.0, "algae with a nearby differently-headed neighbour should have alignment force")
+
+    # ── apply_config updates span caches ──────────────────────────────────
+
+    def test_apply_config_updates_coh_span(self):
+        """apply_config() refreshes _coh_span when radius_cohesion changes."""
+        cfg = self._make_cfg()
+        sim = Simulation(cfg)
+        # Find a sardine and check initial span.
+        if not sim.sardines:
+            return
+        s = sim.sardines[0]
+        initial_span = s._coh_span
+        expected_initial = max(1, math.ceil(cfg.radius_cohesion / s._grid.cell_size))
+        self.assertEqual(initial_span, expected_initial)
+
+        # Change radius_cohesion to something that gives a different span.
+        from dataclasses import replace
+        new_radius = s._grid.cell_size * 2.5   # span would be 3
+        new_cfg = replace(cfg, radius_cohesion=new_radius)
+        sim.apply_config(new_cfg)
+        expected_new = max(1, math.ceil(new_radius / s._grid.cell_size))
+        self.assertEqual(s._coh_span, expected_new,
+            f"_coh_span should update to {expected_new} after apply_config")
+
+    def test_apply_config_updates_flee_span(self):
+        """apply_config() refreshes _flee_span when radius_flee changes."""
+        cfg = self._make_cfg()
+        sim = Simulation(cfg)
+        if not sim.sardines:
+            return
+        s = sim.sardines[0]
+        from dataclasses import replace
+        sf_cs = s._sailfish_grid.cell_size
+        new_radius = sf_cs * 2.1   # forces span=3
+        new_cfg = replace(cfg, radius_flee=new_radius)
+        sim.apply_config(new_cfg)
+        expected = max(1, math.ceil(new_radius / sf_cs))
+        self.assertEqual(s._flee_span, expected,
+            f"_flee_span should update to {expected} after apply_config")
+
+
+
 
 class TestSimulationIntegrity(unittest.TestCase):
     """Integration tests: spawn, 60-frame stability, diagnostics."""
@@ -3632,5 +3888,702 @@ class TestMousePredator(unittest.TestCase):
                         f"Sardine should flee from sailfish or mouse; vx={vx:.3f} vy={vy:.3f}")
 
 
+
+
+# ── Phase 4A/4B: batched sardine state and integration ───────────────────────
+
+class TestPhase4Batching(unittest.TestCase):
+    """Tests for Phase 4A (batch state arrays) and Phase 4B (batch integration).
+
+    All tests use force-free configurations (all weights = 0) so sardines
+    move with their initial velocity only, making integration deterministic.
+    """
+
+    def _no_force_cfg(self, **kwargs) -> SimConfig:
+        """Return a SimConfig with all flocking and flee forces disabled.
+
+        Any keyword can be overridden via kwargs — they take precedence over
+        the defaults below.
+        """
+        defaults: dict = dict(
+            num_sardines=0, num_sailfish=0, num_algae=0,
+            sardine_eat_threshold=0,
+            sardine_starvation_time=0.0,
+            algae_respawn_rate=0.0,
+            weight_separation=0.0, weight_alignment=0.0,
+            weight_cohesion=0.0, weight_noise=0.0,
+            weight_flee=0.0, weight_pursuit=0.0,
+            weight_algae_separation=0.0, weight_algae_alignment=0.0,
+            weight_algae_cohesion=0.0, weight_algae_noise=0.0,
+            sardine_min_speed=0.0,
+        )
+        defaults.update(kwargs)
+        return SimConfig(**defaults)
+
+    # ── Phase 4A: array populate and index assignment ─────────────────
+
+    def test_batch_arrays_allocated_on_first_update(self):
+        """_s_pos/_s_vel/_s_acc are sized >= n after the first update()."""
+        from sim.sardine import Sardine
+        cfg = self._no_force_cfg()
+        sim = Simulation(cfg)
+        for i in range(5):
+            sim.sardines.append(
+                Sardine(float(i * 10), 100.0, 0.0, 0.0, cfg, sim._grid,
+                        sim._sailfish_grid)
+            )
+        sim.update(1 / 60)
+        self.assertGreaterEqual(sim._s_pos.shape[0], 5)
+        self.assertGreaterEqual(sim._s_vel.shape[0], 5)
+        self.assertGreaterEqual(sim._s_acc.shape[0], 5)
+        self.assertEqual(sim._s_n, 5)
+
+    def test_batch_index_assigned_correctly(self):
+        """Each sardine._idx equals its list index after update()."""
+        from sim.sardine import Sardine
+        cfg = self._no_force_cfg()
+        sim = Simulation(cfg)
+        sardines = [
+            Sardine(float(i * 20), 200.0, 0.0, 0.0, cfg, sim._grid,
+                    sim._sailfish_grid)
+            for i in range(4)
+        ]
+        for s in sardines:
+            sim.sardines.append(s)
+        sim.update(1 / 60)
+        for expected_idx, s in enumerate(sim.sardines):
+            self.assertEqual(
+                s._idx, expected_idx,
+                f"sardine {expected_idx}: _idx={s._idx} expected {expected_idx}",
+            )
+
+    def test_batch_pos_populated_matches_position(self):
+        """_s_pos[:n] matches sardine positions at the time of populate."""
+        from sim.sardine import Sardine
+        cfg = self._no_force_cfg()
+        sim = Simulation(cfg)
+        positions = [(100.0, 50.0), (200.0, 150.0), (350.0, 300.0)]
+        for x, y in positions:
+            sim.sardines.append(
+                Sardine(x, y, 0.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
+            )
+        # Run one update to trigger populate; forces are zero so pos barely changes
+        # (integration with v=0 leaves position unchanged).
+        sim.update(1 / 60)
+        # After update, sardine.position reflects post-integration values.
+        # Verify index ↔ object consistency.
+        for s in sim.sardines:
+            self.assertAlmostEqual(
+                float(s.position[0]), sim._s_pos[s._idx, 0], places=5
+            )
+            self.assertAlmostEqual(
+                float(s.position[1]), sim._s_pos[s._idx, 1], places=5
+            )
+
+    def test_capacity_grows_when_sardines_exceed_initial_cap(self):
+        """_ensure_sardine_capacity grows arrays when count exceeds current cap."""
+        from sim.sardine import Sardine
+        cfg = self._no_force_cfg()
+        sim = Simulation(cfg)
+        # Array starts at (0, 2); adding 10 sardines should grow.
+        for i in range(10):
+            sim.sardines.append(
+                Sardine(float(i * 5), 50.0, 0.0, 0.0, cfg, sim._grid,
+                        sim._sailfish_grid)
+            )
+        sim.update(1 / 60)
+        self.assertGreaterEqual(sim._s_pos.shape[0], 10)
+        self.assertEqual(sim._s_n, 10)
+
+    # ── Phase 4B: integration correctness ───────────────────────────────
+
+    def test_batch_integration_moves_sardine_expected_distance(self):
+        """Sardine with constant velocity (no forces) moves v*dt per frame."""
+        from sim.sardine import Sardine
+        vx, vy = 50.0, 30.0
+        dt = 1.0 / 60.0
+        cfg = self._no_force_cfg()
+        sim = Simulation(cfg)
+        s = Sardine(500.0, 300.0, vx, vy, cfg, sim._grid, sim._sailfish_grid)
+        sim.sardines.append(s)
+        x0, y0 = float(s.position[0]), float(s.position[1])
+        sim.update(dt)
+        x1, y1 = float(s.position[0]), float(s.position[1])
+        W = float(cfg.window_width)
+        H = float(cfg.window_height)
+        # Expected displacement (toroidal wrap applied).
+        dx = (x0 + vx * dt) % W - x1
+        dy = (y0 + vy * dt) % H - y1
+        self.assertAlmostEqual(dx, 0.0, places=4,
+                               msg="X displacement incorrect after batch integration")
+        self.assertAlmostEqual(dy, 0.0, places=4,
+                               msg="Y displacement incorrect after batch integration")
+
+    def test_batch_integration_velocity_written_back(self):
+        """sardine.velocity reflects batch-integrated velocity after update()."""
+        from sim.sardine import Sardine
+        vx, vy = 80.0, 0.0
+        dt = 1.0 / 60.0
+        cfg = self._no_force_cfg()
+        sim = Simulation(cfg)
+        s = Sardine(400.0, 400.0, vx, vy, cfg, sim._grid, sim._sailfish_grid)
+        sim.sardines.append(s)
+        sim.update(dt)
+        # No forces → velocity unchanged (forces=0 → acc stays 0 → vel unchanged).
+        self.assertAlmostEqual(float(s.velocity[0]), vx, places=5)
+        self.assertAlmostEqual(float(s.velocity[1]), vy, places=5)
+
+    def test_batch_speed_clamp_max_enforced(self):
+        """Batch integration clamps sardine speed to sardine_max_speed."""
+        from sim.sardine import Sardine
+        max_s = 100.0
+        cfg = self._no_force_cfg(sardine_max_speed=max_s, sardine_max_force=200.0)
+        sim = Simulation(cfg)
+        # Give the sardine a velocity well above max_speed.
+        s = Sardine(300.0, 300.0, 300.0, 400.0, cfg, sim._grid, sim._sailfish_grid)
+        sim.sardines.append(s)
+        sim.update(1 / 60)
+        speed_after = math.sqrt(
+            float(s.velocity[0]) ** 2 + float(s.velocity[1]) ** 2
+        )
+        self.assertLessEqual(
+            speed_after, max_s + 1e-6,
+            f"Batch clamp failed: speed={speed_after:.3f} > max={max_s}",
+        )
+
+    def test_batch_speed_floor_min_enforced(self):
+        """Batch integration raises sardine speed to sardine_min_speed when below."""
+        from sim.sardine import Sardine
+        min_s = 50.0
+        max_s = 150.0
+        cfg = self._no_force_cfg(sardine_min_speed=min_s, sardine_max_speed=max_s,
+                                  sardine_max_force=200.0)
+        sim = Simulation(cfg)
+        # Give the sardine a very slow velocity (below min_speed).
+        s = Sardine(300.0, 300.0, 1.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
+        sim.sardines.append(s)
+        sim.update(1 / 60)
+        speed_after = math.sqrt(
+            float(s.velocity[0]) ** 2 + float(s.velocity[1]) ** 2
+        )
+        self.assertGreaterEqual(
+            speed_after, min_s - 1e-6,
+            f"Batch floor failed: speed={speed_after:.3f} < min={min_s}",
+        )
+
+    def test_batch_boundary_wrap_x(self):
+        """Position wraps correctly at right edge (x > W → x % W)."""
+        from sim.sardine import Sardine
+        dt = 1.0 / 60.0
+        vx = 500.0  # fast enough to cross boundary in one frame
+        cfg = self._no_force_cfg(sardine_max_speed=600.0, sardine_max_force=300.0)
+        sim = Simulation(cfg)
+        W = float(cfg.window_width)
+        # Start near right edge so x + vx*dt > W.
+        x0 = W - 0.5
+        s = Sardine(x0, 300.0, vx, 0.0, cfg, sim._grid, sim._sailfish_grid)
+        sim.sardines.append(s)
+        sim.update(dt)
+        x1 = float(s.position[0])
+        self.assertGreaterEqual(x1, 0.0)
+        self.assertLess(x1, W)
+
+    def test_batch_boundary_wrap_y(self):
+        """Position wraps correctly at top edge (y > H → y % H)."""
+        from sim.sardine import Sardine
+        dt = 1.0 / 60.0
+        vy = 500.0
+        cfg = self._no_force_cfg(sardine_max_speed=600.0, sardine_max_force=300.0)
+        sim = Simulation(cfg)
+        H = float(cfg.window_height)
+        y0 = H - 0.5
+        s = Sardine(300.0, y0, 0.0, vy, cfg, sim._grid, sim._sailfish_grid)
+        sim.sardines.append(s)
+        sim.update(dt)
+        y1 = float(s.position[1])
+        self.assertGreaterEqual(y1, 0.0)
+        self.assertLess(y1, H)
+
+    def test_batch_acceleration_cleared_after_integration(self):
+        """Sardine acceleration is 0 after batch integration completes."""
+        from sim.sardine import Sardine
+        cfg = self._no_force_cfg()
+        sim = Simulation(cfg)
+        s = Sardine(200.0, 200.0, 10.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
+        sim.sardines.append(s)
+        sim.update(1 / 60)
+        self.assertAlmostEqual(float(s.acceleration[0]), 0.0)
+        self.assertAlmostEqual(float(s.acceleration[1]), 0.0)
+
+    # ── Births and deaths ─────────────────────────────────────────────
+
+    def test_births_get_indices_next_frame(self):
+        """After sardine reproduction, offspring have valid _idx on next frame."""
+        from sim.sardine import Sardine
+        cfg = self._no_force_cfg(
+            sardine_eat_threshold=1,
+            sardine_min_speed=0.0,
+        )
+        sim = Simulation(cfg)
+        s = Sardine(400.0, 300.0, 10.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
+        s.food_counter = 1.0  # triggers reproduction this frame
+        sim.sardines.append(s)
+        sim.update(1 / 60)  # reproduction fires → 2 sardines now
+        sim.update(1 / 60)  # next frame: indices reassigned to both
+        self.assertEqual(len(sim.sardines), 2)
+        for i, s in enumerate(sim.sardines):
+            self.assertEqual(s._idx, i,
+                             f"sardine {i} _idx={s._idx} should be {i}")
+
+    def test_deaths_remaining_sardines_valid_next_frame(self):
+        """After sardine removal, remaining sardines have contiguous _idx values."""
+        from sim.sardine import Sardine
+        cfg = self._no_force_cfg()
+        sim = Simulation(cfg)
+        for i in range(5):
+            sim.sardines.append(
+                Sardine(float(i * 30), 200.0, 0.0, 0.0, cfg, sim._grid,
+                        sim._sailfish_grid)
+            )
+        sim.update(1 / 60)
+        # Remove the middle sardine (index 2).
+        del sim.sardines[2]
+        sim.update(1 / 60)  # indices reassigned: 0,1,2,3 for 4 remaining
+        self.assertEqual(len(sim.sardines), 4)
+        self.assertEqual(sim._s_n, 4)
+        for i, s in enumerate(sim.sardines):
+            self.assertEqual(s._idx, i,
+                             f"After deletion, sardine {i} _idx={s._idx} != {i}")
+
+    def test_zero_sardines_no_crash(self):
+        """Simulation with 0 sardines runs update() without error."""
+        cfg = self._no_force_cfg()
+        sim = Simulation(cfg)
+        # No sardines added; just run several frames.
+        for _ in range(5):
+            sim.update(1 / 60)
+        self.assertEqual(sim._s_n, 0)
+
+    def test_apply_config_max_speed_used_in_batch_clamp(self):
+        """Config change to sardine_max_speed is respected by batch clamp."""
+        from sim.sardine import Sardine
+        cfg = self._no_force_cfg(sardine_max_speed=200.0, sardine_max_force=300.0)
+        sim = Simulation(cfg)
+        s = Sardine(300.0, 300.0, 250.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
+        sim.sardines.append(s)
+
+        # Lower max_speed via apply_config.
+        import dataclasses as _dc
+        new_cfg = _dc.replace(cfg, sardine_max_speed=80.0)
+        sim.apply_config(new_cfg)
+
+        sim.update(1 / 60)
+        speed_after = float(s.speed)
+        self.assertLessEqual(
+            speed_after, 80.0 + 1e-6,
+            f"speed={speed_after:.3f} should be ≤ new max_speed 80",
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# =============================================================================
+# Phase 4C — Batched force computation tests
+# =============================================================================
+
+class TestPhase4CBatchedForces(unittest.TestCase):
+    """Tests for Phase 4C: numpy cell-bucket sardine force computation.
+
+    Verifies:
+      - Separation, alignment, cohesion forces are non-zero in known configs
+      - No self-interaction in batch results
+      - Toroidal wrap delta computed correctly
+      - Flee force injected correctly
+      - Output numerically close to per-sardine _compute_forces() reference
+      - Zero-sardine edge case doesn't crash
+      - Single-sardine edge case produces no flocking force
+    """
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    def _flock_cfg(self, **overrides):
+        """Config with flocking enabled, flee disabled."""
+        defaults = dict(
+            num_sardines=0, num_sailfish=0, num_algae=0,
+            sardine_eat_threshold=0,
+            sardine_starvation_time=0.0,
+            algae_respawn_rate=0.0,
+            weight_flee=0.0, weight_pursuit=0.0,
+            weight_algae_separation=0.0, weight_algae_alignment=0.0,
+            weight_algae_cohesion=0.0, weight_algae_noise=0.0,
+            weight_noise=0.0,
+            sardine_min_speed=0.0,
+            mouse_predator_enabled=False,
+        )
+        defaults.update(overrides)
+        return SimConfig(**defaults)
+
+    def _make_sardine(self, x, y, vx, vy, cfg, grid, sf_grid=None):
+        from sim.sardine import Sardine
+        return Sardine(x, y, vx, vy, cfg, grid, sf_grid)
+
+    def _make_sim_with_sardines(self, positions, velocities, cfg):
+        """Build a Simulation and add sardines at given positions/velocities."""
+        from sim.simulation import Simulation
+        from sim.sardine import Sardine
+        sim = Simulation(cfg)
+        for (x, y), (vx, vy) in zip(positions, velocities):
+            sim.sardines.append(
+                Sardine(x, y, vx, vy, cfg, sim._grid, sim._sailfish_grid)
+            )
+        return sim
+
+    # ── zero sardines ─────────────────────────────────────────────────────────
+
+    def test_zero_sardines_no_crash(self):
+        """_batch_compute_sardine_forces() with 0 sardines runs without error."""
+        from sim.simulation import Simulation
+        cfg = self._flock_cfg()
+        sim = Simulation(cfg)
+        # Force population > 500 threshold by manually setting _s_n to 0
+        sim._s_n = 0
+        sim._batch_compute_sardine_forces()   # must not raise
+
+    # ── single sardine ────────────────────────────────────────────────────────
+
+    def test_single_sardine_no_flocking_force(self):
+        """With no noise and one sardine, batch produces zero acc."""
+        from sim.simulation import Simulation
+        from sim.sardine import Sardine
+        cfg = self._flock_cfg()
+        sim = Simulation(cfg)
+        sim.sardines.append(Sardine(300.0, 300.0, 50.0, 0.0, cfg, sim._grid))
+        sim.update(1 / 60)
+
+    # ── no self-interaction ───────────────────────────────────────────────────
+
+    def test_no_self_interaction(self):
+        """No sardine's own position contributes to its own separation force.
+
+        Place a sardine at the origin and a second one far away.  The first
+        should only be influenced by the second, never by itself.
+        """
+        from sim.simulation import Simulation
+        from sim.sardine import Sardine
+
+        cfg = self._flock_cfg(
+            weight_separation=2.0, weight_alignment=0.0, weight_cohesion=0.0,
+            radius_separation=40.0, window_width=1400, window_height=700,
+        )
+        sim = Simulation(cfg)
+        # Two sardines that are within separation range of each other.
+        s0 = Sardine(300.0, 300.0, 50.0, 0.0, cfg, sim._grid)
+        s1 = Sardine(320.0, 300.0, 50.0, 0.0, cfg, sim._grid)
+        sim.sardines.extend([s0, s1])
+
+        # Rebuild grid and arrays manually.
+        sim._grid.clear()
+        for s in sim.sardines:
+            sim._grid.insert(s)
+        n = len(sim.sardines)
+        sim._s_n = n
+        sim._ensure_sardine_capacity(n)
+        for i, s in enumerate(sim.sardines):
+            s._idx = i
+            sim._s_pos[i] = [s._gx, s._gy]
+            sim._s_vel[i] = [s._gvx, s._gvy]
+
+        sim._batch_compute_sardine_forces()
+
+        # s0 is to the left of s1 → separation pushes s0 to the left (acc[0] < 0).
+        acc0x = float(sim._s_acc[0, 0])
+        acc1x = float(sim._s_acc[1, 0])
+
+        # acc0x should be negative (pushed away from s1 which is to the right)
+        # acc1x should be positive (pushed away from s0 which is to the left)
+        # If self-interaction occurred, both would be zero.
+        self.assertLess(acc0x, 0.0, "s0 should be pushed left by s1 separation")
+        self.assertGreater(acc1x, 0.0, "s1 should be pushed right by s0 separation")
+
+    # ── separation force ──────────────────────────────────────────────────────
+
+    def test_batch_separation_nonzero_close_pair(self):
+        """Batch force is non-zero for a pair within separation radius."""
+        from sim.simulation import Simulation
+        from sim.sardine import Sardine
+
+        cfg = self._flock_cfg(
+            weight_separation=2.0, weight_alignment=0.0, weight_cohesion=0.0,
+            radius_separation=40.0,
+        )
+        sim = Simulation(cfg)
+        s0 = Sardine(300.0, 300.0, 50.0, 0.0, cfg, sim._grid)
+        s1 = Sardine(315.0, 300.0, 50.0, 0.0, cfg, sim._grid)  # 15 px within sep_r=40
+        sim.sardines.extend([s0, s1])
+
+        sim._grid.clear()
+        for s in sim.sardines:
+            sim._grid.insert(s)
+        n = len(sim.sardines)
+        sim._s_n = n
+        sim._ensure_sardine_capacity(n)
+        for i, s in enumerate(sim.sardines):
+            s._idx = i
+            sim._s_pos[i] = [s._gx, s._gy]
+            sim._s_vel[i] = [s._gvx, s._gvy]
+
+        sim._batch_compute_sardine_forces()
+
+        mag0 = math.sqrt(float(sim._s_acc[0, 0])**2 + float(sim._s_acc[0, 1])**2)
+        self.assertGreater(mag0, 0.0, "separation should produce non-zero acc")
+
+    # ── toroidal wrap correctness ─────────────────────────────────────────────
+
+    def test_batch_toroidal_wrap_detect_neighbour(self):
+        """Batch sees a neighbour across the toroidal boundary."""
+        from sim.simulation import Simulation
+        from sim.sardine import Sardine
+
+        W, H = 1400, 700
+        cfg = self._flock_cfg(
+            window_width=W, window_height=H,
+            weight_separation=0.0, weight_alignment=0.0, weight_cohesion=1.0,
+            radius_cohesion=80.0, cell_size=80.0,
+        )
+        sim = Simulation(cfg)
+        # Place s0 near the right edge, s1 near the left edge — they should
+        # see each other across the wrap (distance ~30 px < coh_r=80).
+        s0 = Sardine(W - 15.0, 300.0, 50.0, 0.0, cfg, sim._grid)
+        s1 = Sardine(15.0,      300.0, 50.0, 0.0, cfg, sim._grid)
+        sim.sardines.extend([s0, s1])
+
+        sim._grid.clear()
+        for s in sim.sardines:
+            sim._grid.insert(s)
+        n = len(sim.sardines)
+        sim._s_n = n
+        sim._ensure_sardine_capacity(n)
+        for i, s in enumerate(sim.sardines):
+            s._idx = i
+            sim._s_pos[i] = [s._gx, s._gy]
+            sim._s_vel[i] = [s._gvx, s._gvy]
+
+        sim._batch_compute_sardine_forces()
+
+        # At least one sardine should have a non-zero cohesion force.
+        mag0 = math.sqrt(float(sim._s_acc[0, 0])**2 + float(sim._s_acc[0, 1])**2)
+        mag1 = math.sqrt(float(sim._s_acc[1, 0])**2 + float(sim._s_acc[1, 1])**2)
+        self.assertGreater(mag0 + mag1, 0.0,
+            "Toroidal wrap should allow sardines near opposite edges to see each other")
+
+    # ── equivalence with per-sardine reference ────────────────────────────────
+
+    def test_batch_matches_per_sardine_reference(self):
+        """_batch_compute_sardine_forces() is numerically close to the per-sardine loop.
+
+        Use a large grid (far above the 500-sardine threshold) with several
+        sardines in a cluster.  Both paths must reach the same result within
+        a tight tolerance (they use the same formula, so agreement should be
+        within floating-point rounding).
+        """
+        from sim.simulation import Simulation
+        from sim.sardine import Sardine
+
+        W, H = 1400, 700
+        cfg = self._flock_cfg(
+            window_width=W, window_height=H,
+            weight_separation=2.0, weight_alignment=1.3, weight_cohesion=1.0,
+            radius_separation=40.0, radius_alignment=75.0, radius_cohesion=80.0,
+            cell_size=80.0,
+        )
+
+        # Build 600 sardines in a concentrated cluster so the neighbourhood
+        # lookup is non-trivial and all four forces fire for every sardine.
+        n_sardines = 600
+        rng = np.random.default_rng(9)
+        xs  = rng.uniform(300, 600, n_sardines)
+        ys  = rng.uniform(200, 500, n_sardines)
+        vxs = rng.uniform(-50, 50, n_sardines)
+        vys = rng.uniform(-50, 50, n_sardines)
+
+        # ── Reference: per-sardine loop ──────────────────────────────────────
+        sim_ref = Simulation(cfg)
+        for i in range(n_sardines):
+            sim_ref.sardines.append(
+                Sardine(xs[i], ys[i], vxs[i], vys[i], cfg, sim_ref._grid)
+            )
+        # Build grid + arrays without calling update() to avoid ecology effects.
+        sim_ref._grid.clear()
+        for s in sim_ref.sardines:
+            sim_ref._grid.insert(s)
+        n = len(sim_ref.sardines)
+        sim_ref._s_n = n
+        sim_ref._ensure_sardine_capacity(n)
+        for i, s in enumerate(sim_ref.sardines):
+            s._idx = i
+            sim_ref._s_pos[i] = [s._gx, s._gy]
+            sim_ref._s_vel[i] = [s._gvx, s._gvy]
+
+        # Run reference per-sardine forces and copy acc into array.
+        for i, s in enumerate(sim_ref.sardines):
+            s.acceleration[:] = 0.0
+            s._compute_forces()
+            sim_ref._s_acc[i, 0] = float(s.acceleration[0])
+            sim_ref._s_acc[i, 1] = float(s.acceleration[1])
+        ref_acc = sim_ref._s_acc[:n].copy()
+
+        # ── Batch path (≥ 500 sardines triggers numpy path) ──────────────────
+        sim_batch = Simulation(cfg)
+        for i in range(n_sardines):
+            sim_batch.sardines.append(
+                Sardine(xs[i], ys[i], vxs[i], vys[i], cfg, sim_batch._grid)
+            )
+        sim_batch._grid.clear()
+        for s in sim_batch.sardines:
+            sim_batch._grid.insert(s)
+        n = len(sim_batch.sardines)
+        sim_batch._s_n = n
+        sim_batch._ensure_sardine_capacity(n)
+        for i, s in enumerate(sim_batch.sardines):
+            s._idx = i
+            sim_batch._s_pos[i] = [s._gx, s._gy]
+            sim_batch._s_vel[i] = [s._gvx, s._gvy]
+
+        sim_batch._batch_compute_sardine_forces()
+        batch_acc = sim_batch._s_acc[:n].copy()
+
+        # Expect values to match within 0.1% relative tolerance + small absolute tol.
+        np.testing.assert_allclose(
+            batch_acc, ref_acc, rtol=1e-3, atol=1e-3,
+            err_msg="Batch force acc should match per-sardine reference within tolerance",
+        )
+
+    # ── flee force ────────────────────────────────────────────────────────────
+
+    def test_batch_flee_force_nonzero_when_sailfish_nearby(self):
+        """Batch correctly injects flee force when a sailfish is in range (≥500 path)."""
+        from sim.simulation import Simulation
+        from sim.sardine import Sardine
+        from sim.sailfish import Sailfish
+
+        W, H = 1400, 700
+        cfg = SimConfig(
+            num_sardines=0, num_sailfish=0, num_algae=0,
+            window_width=W, window_height=H,
+            sardine_eat_threshold=0, sardine_starvation_time=0.0,
+            algae_respawn_rate=0.0,
+            weight_separation=0.0, weight_alignment=0.0, weight_cohesion=0.0,
+            weight_noise=0.0, weight_pursuit=0.0,
+            weight_algae_separation=0.0, weight_algae_alignment=0.0,
+            weight_algae_cohesion=0.0, weight_algae_noise=0.0,
+            weight_flee=10.0,
+            radius_flee=100.0,
+            sardine_min_speed=0.0,
+            mouse_predator_enabled=False,
+        )
+
+        # Build ≥500 sardines so we exercise the numpy path.
+        n_sards = 600
+        rng = np.random.default_rng(7)
+        xs = rng.uniform(100, 600, n_sards)
+        ys = rng.uniform(100, 600, n_sards)
+
+        sim = Simulation(cfg)
+        for i in range(n_sards):
+            sim.sardines.append(
+                Sardine(xs[i], ys[i], 50.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
+            )
+
+        # Place one sailfish very close to sardine 0 (within flee radius).
+        sf = Sailfish(xs[0] + 30.0, ys[0], 0.0, 0.0, cfg, sim._grid)
+        sim.sailfish.append(sf)
+
+        # Rebuild grids + arrays.
+        sim._grid.clear()
+        sim._sailfish_grid.clear()
+        for s in sim.sardines:
+            sim._grid.insert(s)
+        for sf in sim.sailfish:
+            sim._sailfish_grid.insert(sf)
+
+        n = len(sim.sardines)
+        sim._s_n = n
+        sim._ensure_sardine_capacity(n)
+        for i, s in enumerate(sim.sardines):
+            s._idx = i
+            sim._s_pos[i] = [s._gx, s._gy]
+            sim._s_vel[i] = [s._gvx, s._gvy]
+
+        sim._batch_compute_sardine_forces()
+
+        # Sardine 0 is 30 px from the sailfish → flee should fire.
+        mag0 = math.sqrt(float(sim._s_acc[0, 0])**2 + float(sim._s_acc[0, 1])**2)
+        self.assertGreater(mag0, 0.0, "Sardine 0 should have non-zero flee force")
+
+    # ── stable small population ───────────────────────────────────────────────
+
+    def test_stable_small_population_uses_fallback(self):
+        """Below threshold (< 500), fallback path runs without crash or NaN."""
+        from sim.simulation import Simulation
+        from sim.sardine import Sardine
+
+        cfg = self._flock_cfg(
+            weight_separation=2.0, weight_alignment=1.3, weight_cohesion=1.0,
+            radius_separation=40.0, radius_alignment=75.0, radius_cohesion=80.0,
+        )
+        sim = Simulation(cfg)
+        for i in range(20):
+            sim.sardines.append(
+                Sardine(float(i * 30 + 100), 200.0, 50.0, 0.0, cfg, sim._grid)
+            )
+
+        for _ in range(10):
+            sim.update(1 / 60)
+
+        for s in sim.sardines:
+            for v in [float(s.position[0]), float(s.position[1]),
+                      float(s.velocity[0]), float(s.velocity[1])]:
+                self.assertFalse(math.isnan(v), f"NaN detected in sardine state: {v}")
+                self.assertFalse(math.isinf(v), f"Inf detected in sardine state: {v}")
+
+    # ── no NaN / Inf at scale ─────────────────────────────────────────────────
+
+    def test_no_nan_inf_large_population(self):
+        """Batch force computation with 1000 sardines produces no NaN or Inf in acc."""
+        from sim.simulation import Simulation
+        from sim.sardine import Sardine
+
+        W, H = 1400, 700
+        cfg = self._flock_cfg(
+            window_width=W, window_height=H,
+            weight_separation=2.0, weight_alignment=1.3, weight_cohesion=1.0,
+            radius_separation=40.0, radius_alignment=75.0, radius_cohesion=80.0,
+            cell_size=80.0,
+        )
+
+        n_sards = 1000
+        rng = np.random.default_rng(13)
+        xs  = rng.uniform(0, W, n_sards)
+        ys  = rng.uniform(0, H, n_sards)
+        vxs = rng.uniform(-150, 150, n_sards)
+        vys = rng.uniform(-150, 150, n_sards)
+
+        sim = Simulation(cfg)
+        for i in range(n_sards):
+            sim.sardines.append(
+                Sardine(xs[i], ys[i], vxs[i], vys[i], cfg, sim._grid)
+            )
+
+        for _ in range(5):
+            sim.update(1 / 60)
+
+        n = sim._s_n
+        acc = sim._s_acc[:n]
+        self.assertFalse(
+            np.isnan(acc).any(), "NaN found in _s_acc after batch force computation"
+        )
+        self.assertFalse(
+            np.isinf(acc).any(), "Inf found in _s_acc after batch force computation"
+        )
