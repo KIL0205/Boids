@@ -214,13 +214,11 @@ class Sailfish(Boid):
             # ── No locked target: query sardines for acquisition or COM ──
             sardines = self._sardine_grid.query(self, cfg.radius_sailfish_awareness)
             if sardines:
-                # Single pass: accumulate COM and find nearest within acq_r.
-                acq_r2  = cfg.sailfish_target_acquire_radius ** 2
-                best_d2 = 1e18
-                best_s  = None
-                alt_d2  = 1e18
-                alt_s   = None
-                cx = cy = 0.0
+                # Single pass: accumulate COM offsets and collect acquisition
+                # candidates into a small list for Phase 3 vulnerability scoring.
+                acq_r2     = cfg.sailfish_target_acquire_radius ** 2
+                cx = cy    = 0.0
+                candidates = []      # [(dx, dy, d2, sardine)] within acq_r
                 for s in sardines:
                     dx = s._gx - px
                     dy = s._gy - py
@@ -232,21 +230,56 @@ class Sailfish(Boid):
                     cy += dy
                     d2 = dx * dx + dy * dy
                     if d2 < acq_r2:
-                        if d2 < best_d2:
-                            alt_d2, alt_s = best_d2, best_s
-                            best_d2, best_s = d2, s
-                        elif d2 < alt_d2:
-                            alt_d2, alt_s = d2, s
+                        candidates.append((dx, dy, d2, s))
 
-                if best_s is not None:
-                    # Shared-target reduction: soft preference to avoid multiple
-                    # sailfish locking the same sardine when an alternative exists.
+                if candidates:
+                    # ── Vulnerable-target scoring (Phase 3) ───────────────
+                    # Desirability = weighted sum of three normalised factors:
+                    #   proximity:  closer sardines are easier to intercept.
+                    #   isolation:  sardines far from the local sardine COM
+                    #               are on the periphery and more exposed.
+                    #   slowness:   slower sardines are harder to escape.
+                    # Higher score = more attractive target.
+                    n          = len(sardines)
+                    com_x      = cx / n
+                    com_y      = cy / n
+                    w_dist     = cfg.sailfish_target_dist_weight
+                    w_iso      = cfg.sailfish_target_isolation_weight
+                    w_spd      = cfg.sailfish_target_speed_weight
+                    inv_acq_r2 = 1.0 / acq_r2
+                    inv_awa_r2 = 1.0 / (cfg.radius_sailfish_awareness
+                                        * cfg.radius_sailfish_awareness)
+                    max_spd2   = cfg.sardine_max_speed * cfg.sardine_max_speed
+                    best_score = -1e18
+                    best_s     = None
+                    alt_score  = -1e18
+                    alt_s      = None
+                    for dx, dy, d2, s in candidates:
+                        # Squared distance of sardine from local school COM.
+                        iso_d2 = (dx - com_x) ** 2 + (dy - com_y) ** 2
+                        # Sardine speed squared (from spatial-hash velocity cache).
+                        s_spd2 = s._gvx * s._gvx + s._gvy * s._gvy
+                        score  = (
+                            w_dist * (1.0 - d2   * inv_acq_r2)
+                            + w_iso  * iso_d2 * inv_awa_r2
+                            + w_spd  * (1.0 - min(s_spd2 / max_spd2, 1.0))
+                        )
+                        if score > best_score:
+                            alt_score, alt_s = best_score, best_s
+                            best_score, best_s = score, s
+                        elif score > alt_score:
+                            alt_score, alt_s = score, s
+
+                    # Shared-target reduction (Phase 2): if a nearby sailfish
+                    # already holds the best candidate and an alternative exists,
+                    # prefer the alternative.
                     if self._sailfish_grid is not None and alt_s is not None:
                         sf_nb = self._sailfish_grid.query(
                             self, cfg.sailfish_target_acquire_radius
                         )
                         if any(other._target_sardine is best_s for other in sf_nb):
                             best_s = alt_s
+
                     # Lock onto chosen sardine; apply predictive pursuit.
                     self._target_sardine    = best_s
                     self._target_lock_timer = cfg.sailfish_target_lock_time
@@ -267,8 +300,32 @@ class Sailfish(Boid):
 
                 else:
                     # No sardine close enough to lock — steer toward school COM.
-                    n = len(sardines)
-                    self._steer_apply_xy(cx / n, cy / n, cfg.weight_pursuit)
+                    # Phase 3: add an orbit/pressure bias when the school is
+                    # dense so sailfish circle the mass rather than always
+                    # diving straight into the tightest cluster.
+                    n     = len(sardines)
+                    com_x = cx / n
+                    com_y = cy / n
+                    self._steer_apply_xy(com_x, com_y, cfg.weight_pursuit)
+                    if n >= cfg.sailfish_school_pressure_density_threshold:
+                        com_d2 = com_x * com_x + com_y * com_y
+                        if com_d2 > 1.0:
+                            com_inv = 1.0 / math.sqrt(com_d2)
+                            com_nx  = com_x * com_inv
+                            com_ny  = com_y * com_inv
+                            # cross2d(com_dir, vel) > 0  →  vel is CCW of COM;
+                            # reinforce whichever orbit direction is already set.
+                            vx    = float(self.velocity[0])
+                            vy    = float(self.velocity[1])
+                            cross = com_nx * vy - com_ny * vx
+                            if cross >= 0.0:
+                                pnx = -com_ny;  pny =  com_nx  # CCW tangent
+                            else:
+                                pnx =  com_ny;  pny = -com_nx  # CW tangent
+                            self._steer_apply_xy(
+                                pnx, pny,
+                                cfg.sailfish_school_pressure_strength,
+                            )
 
         # ── Sailfish flocking: separation / alignment / cohesion ──────
         if self._sailfish_grid is None:

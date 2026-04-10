@@ -143,6 +143,25 @@ class SimConfig:
     sailfish_burst_speed_mult:      float = 1.45    # multiplier on sailfish_max_speed
     sailfish_burst_force_mult:      float = 1.8     # multiplier on sailfish_max_force
 
+    # ── Sailfish Phase 3: vulnerable-target selection ────────────────────
+    # Each factor is a dimensionless weight; set to 0.0 to disable that factor.
+    # proximity: prefer sardines closer to this sailfish (within acq radius).
+    # isolation: prefer sardines far from the local sardine school COM — they
+    #            are on the edge of the school and harder for neighbors to cover.
+    # slowness:  prefer sardines moving slower than sardine_max_speed.
+    sailfish_target_dist_weight:      float = 1.0
+    sailfish_target_isolation_weight: float = 1.2
+    sailfish_target_speed_weight:     float = 0.5
+
+    # ── Sailfish Phase 3: dense-school pressure / orbit ──────────────────
+    # When a sailfish sees >= density_threshold sardines within awareness radius
+    # but has no individual target close enough to lock, it adds a gentle
+    # orbit/tangential force around the school rather than always diving inward.
+    # strength:          force multiplier on the perpendicular steer (0 = off).
+    # density_threshold: minimum visible sardines to activate the orbit bias.
+    sailfish_school_pressure_strength:           float = 0.8
+    sailfish_school_pressure_density_threshold:  int   = 8
+
     # ── Sailfish flocking (sailfish-vs-sailfish interactions) ─────────────
     # Separation is the primary mechanism — spreads sailfish around prey
     # instead of stacking.  Alignment adds light heading coordination.

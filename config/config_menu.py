@@ -125,83 +125,115 @@ class _GroupRow:
 
 
 # ── Row definitions ───────────────────────────────────────────────────────
+#
+# Structure:
+#   SARDINES           — movement, flocking weights+radii, flee, color
+#   MOUSE PREDATOR     — toggle, radius, flee wt
+#   SAILFISH—FLOCKING  — movement, sailfish-to-sailfish flocking, color
+#   SAILFISH—HUNTING   — COM pursuit, individual targeting, vulnerability
+#                        scoring, school-pressure/orbit
+#   SAILFISH—BURST     — burst trigger, duration, cooldown, multipliers
+#   ALGAE              — drift kinematics, flocking weights, respawn/ecology
+#   ECOLOGY            — sardine + sailfish reproduction/starvation
+#   Save
 
 _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
-    _GroupRow("SARDINE FLOCKING"),
+    # ── Sardines ──────────────────────────────────────────────────────
+    _GroupRow("SARDINES"),
+    # Movement
+    _MenuItem("Sardine speed",   "sardine_max_speed",       10.0,  50.0,  50.0,  500.0),
+    _MenuItem("Sardine force",   "sardine_max_force",       10.0,  50.0,  10.0,  500.0),
+    # Flocking weights
     _MenuItem("Sep weight",      "weight_separation",        0.1,   1.0,   0.0,   10.0),
     _MenuItem("Ali weight",      "weight_alignment",         0.1,   1.0,   0.0,   10.0),
     _MenuItem("Coh weight",      "weight_cohesion",          0.1,   1.0,   0.0,   10.0),
     _MenuItem("Noise weight",    "weight_noise",             0.01,  0.1,   0.0,    0.5),
-    _GroupRow("KINEMATICS"),
-    _MenuItem("Sardine speed",   "sardine_max_speed",       10.0,  50.0,  50.0,  500.0),
-    _MenuItem("Sardine force",   "sardine_max_force",       10.0,  50.0,  10.0,  500.0),
-    _GroupRow("PERCEPTION RADII"),
+    # Perception radii
     _MenuItem("Sep radius",      "radius_separation",        2.0,  20.0,   5.0,  100.0),
     _MenuItem("Ali radius",      "radius_alignment",         2.0,  20.0,  10.0,  150.0),
     _MenuItem("Coh radius",      "radius_cohesion",          2.0,  20.0,  10.0,  150.0),
-    _GroupRow("FLEE / AVOIDANCE"),
+    # Flee / predator avoidance
     _MenuItem("Flee weight",     "weight_flee",              0.5,   5.0,   0.0,   30.0),
     _MenuItem("Flee radius",     "radius_flee",              5.0,  50.0,  20.0,  300.0),
+    # Color
+    _CycleItem("Color mode",     "sardine_color_mode",
+               ("white", "rainbow", "cool", "warm", "ocean", "sunset", "mono")),
+    _MenuItem("Vel heading wt",  "vel_color_heading_weight", 0.1,   0.5,   0.0,    2.0),
+    _MenuItem("Vel speed wt",    "vel_color_speed_weight",   0.1,   0.5,   0.0,    2.0),
+    _MenuItem("Vel turn wt",     "vel_color_turn_weight",    0.1,   0.5,   0.0,    2.0),
+    _MenuItem("Vel smoothing",   "vel_color_smoothing",      0.05,  0.1,   0.0,    0.99),
+
+    # ── Mouse predator ────────────────────────────────────────────────
     _GroupRow("MOUSE PREDATOR"),
     _ToggleItem("Mouse predator", "mouse_predator_enabled"),
     _MenuItem("Mouse radius",    "mouse_predator_radius",    5.0,  50.0,  20.0,  400.0),
-    _MenuItem("Mouse flee wt",   "mouse_predator_flee_weight", 0.1, 0.5,  0.0,    5.0),
-    _GroupRow("SAILFISH FLOCKING"),
+    _MenuItem("Mouse flee wt",   "mouse_predator_flee_weight", 0.1, 0.5,   0.0,    5.0),
+
+    # ── Sailfish: movement + sailfish-to-sailfish flocking ────────────
+    _GroupRow("SAILFISH — FLOCKING"),
+    # Movement
+    _MenuItem("Sailfish speed",  "sailfish_max_speed",      10.0,  50.0,  50.0,  600.0),
+    _MenuItem("Sailfish force",  "sailfish_max_force",      10.0,  50.0,  10.0,  600.0),
+    # Sailfish-to-sailfish flocking
     _MenuItem("SF sep weight",   "weight_sailfish_separation",  0.1,   1.0,   0.0,   10.0),
     _MenuItem("SF sep radius",   "radius_sailfish_separation",  2.0,  20.0,   5.0,  200.0),
     _MenuItem("SF ali weight",   "weight_sailfish_alignment",   0.1,   1.0,   0.0,   10.0),
     _MenuItem("SF ali radius",   "radius_sailfish_alignment",   5.0,  50.0,  20.0,  400.0),
     _MenuItem("SF coh weight",   "weight_sailfish_cohesion",    0.1,   1.0,   0.0,   10.0),
     _MenuItem("SF coh radius",   "radius_sailfish_cohesion",    5.0,  50.0,  20.0,  400.0),
-    _GroupRow("SAILFISH"),
+    # Color
+    _CycleItem("Color mode",     "sailfish_color_mode",
+               ("default", "white", "red", "blue", "black")),
+
+    # ── Sailfish: hunting, targeting, and school-pressure ─────────────
+    _GroupRow("SAILFISH — HUNTING"),
+    # Long-range COM pursuit
     _MenuItem("Pursuit wt",      "weight_pursuit",           0.1,   1.0,   0.0,   10.0),
     _MenuItem("Pursuit radius",  "radius_sailfish_awareness",5.0,  50.0,  50.0,  400.0),
-    _MenuItem("Sailfish speed",  "sailfish_max_speed",      10.0,  50.0,  50.0,  600.0),
-    _MenuItem("Sailfish force",  "sailfish_max_force",      10.0,  50.0,  10.0,  600.0),
-    _MenuItem("Acquir radius",   "sailfish_target_acquire_radius", 5.0, 50.0, 20.0, 400.0),
+    # Individual target acquisition
+    _MenuItem("Acquire radius",  "sailfish_target_acquire_radius", 5.0, 50.0, 20.0, 400.0),
     _MenuItem("Drop radius",     "sailfish_target_drop_radius",    5.0, 50.0, 20.0, 600.0),
     _MenuItem("Lock time",       "sailfish_target_lock_time",      0.5,  1.0,  0.0,  30.0),
     _MenuItem("Target wt",       "weight_target_pursuit",          0.1,  1.0,  0.0,  10.0),
+    # Vulnerability scoring: higher weight → stronger preference
+    _MenuItem("Tgt dist wt",     "sailfish_target_dist_weight",    0.1,  0.5,  0.0,   5.0),
+    _MenuItem("Tgt iso wt",      "sailfish_target_isolation_weight",0.1, 0.5,  0.0,   5.0),
+    _MenuItem("Tgt spd wt",      "sailfish_target_speed_weight",   0.1,  0.5,  0.0,   5.0),
+    # School-pressure / orbit bias (activates when no target, school dense)
+    _MenuItem("Pressure str",    "sailfish_school_pressure_strength",        0.1, 0.5, 0.0, 5.0),
+    _MenuItem("Pressure dens",   "sailfish_school_pressure_density_threshold", 1.0, 5.0, 1.0, 100.0),
+
+    # ── Sailfish: burst attack ─────────────────────────────────────────
+    _GroupRow("SAILFISH — BURST"),
     _MenuItem("Burst trig r",    "sailfish_burst_trigger_radius",  5.0, 50.0, 10.0, 300.0),
     _MenuItem("Burst duration",  "sailfish_burst_duration",        0.1,  0.5,  0.0,   5.0),
     _MenuItem("Burst cooldown",  "sailfish_burst_cooldown",        0.5,  1.0,  0.0,  15.0),
     _MenuItem("Burst spd mult",  "sailfish_burst_speed_mult",      0.05, 0.1,  1.0,   3.0),
     _MenuItem("Burst frc mult",  "sailfish_burst_force_mult",      0.1,  0.5,  1.0,   4.0),
-    _GroupRow("ECOSYSTEM"),
 
-    # ─ Algae respawn ──────────────────────────────────────────────
-    # Live-effective: ecology pass reads these from self.config each frame.
-    _MenuItem("Algae respawn",   "algae_respawn_rate",       2.0,   5.0,   0.0,   200.0),
-    _MenuItem("Algae max",       "algae_max_count",         50.0, 200.0, 100.0, 5000.0),
-    _MenuItem("Algae eat r",     "algae_eat_radius",         1.0,   5.0,   4.0,   50.0),
-    # ─ Sardine ecology ─────────────────────────────────────────────
-    # Repro thresh is an int field — _adjust_value casts new_val to int.
-    # Applies to all sardines immediately because update() reads self.config.
-    _MenuItem("Repro thresh",    "sardine_eat_threshold",    1.0,   5.0,   0.0,   20.0),
-    _MenuItem("Sardine starve",  "sardine_starvation_time",  1.0,  10.0,   0.0,  300.0),
-    # ─ Sailfish ecology ─────────────────────────────────────────────
-    _MenuItem("Sailfish eat r",  "sailfish_eat_radius",      1.0,   5.0,  10.0,   80.0),
-    _MenuItem("Sailfish starve", "sailfish_starvation_time", 5.0,  30.0,   0.0,  600.0),
-    _MenuItem("Sailfish repro",  "sailfish_eat_threshold",   1.0,   5.0,   0.0,   75.0),
-    _ToggleItem("SF starvation", "sailfish_starvation_enabled"),
-    _ToggleItem("SF repro",      "sailfish_reproduction_enabled"),
-    _GroupRow("ALGAE DRIFT"),
-    # ─ Algae kinematics / flocking ─────────────────────────────────────
-    # Live-effective via apply_config which propagates max_speed/max_force and
-    # agent._config to all Algae objects.  Weights read from agent._config
-    # inside _compute_forces each frame.
+    # ── Algae ──────────────────────────────────────────────────────────
+    _GroupRow("ALGAE"),
+    # Drift kinematics and flocking weights
     _MenuItem("Algae speed",     "algae_max_speed",          1.0,   5.0,   1.0,  100.0),
     _MenuItem("Algae align wt",  "weight_algae_alignment",   0.1,   0.5,   0.0,    5.0),
     _MenuItem("Algae sep wt",    "weight_algae_separation",  0.1,   0.5,   0.0,    5.0),
-    _GroupRow("VISUAL"),
-    _CycleItem("Sardine color",      "sardine_color_mode",
-               ("white", "rainbow", "cool", "warm", "ocean", "sunset", "mono")),
-    _CycleItem("Sailfish color",     "sailfish_color_mode",
-               ("default", "white", "red", "blue", "black")),
-    _MenuItem("Vel heading wt",      "vel_color_heading_weight",  0.1, 0.5, 0.0, 2.0),
-    _MenuItem("Vel speed wt",        "vel_color_speed_weight",    0.1, 0.5, 0.0, 2.0),
-    _MenuItem("Vel turn wt",         "vel_color_turn_weight",     0.1, 0.5, 0.0, 2.0),
-    _MenuItem("Vel smoothing",       "vel_color_smoothing",       0.05, 0.1, 0.0, 0.99),
+    # Ecology
+    _MenuItem("Algae respawn",   "algae_respawn_rate",       2.0,   5.0,   0.0,  200.0),
+    _MenuItem("Algae max",       "algae_max_count",         50.0, 200.0, 100.0, 5000.0),
+    _MenuItem("Algae eat r",     "algae_eat_radius",         1.0,   5.0,   4.0,   50.0),
+
+    # ── Ecology: reproduction and starvation ───────────────────────────
+    _GroupRow("ECOLOGY"),
+    # Sardine
+    _MenuItem("Sardine repro",   "sardine_eat_threshold",    1.0,   5.0,   0.0,   20.0),
+    _MenuItem("Sardine starve",  "sardine_starvation_time",  1.0,  10.0,   0.0,  300.0),
+    # Sailfish
+    _MenuItem("Sailfish eat r",  "sailfish_eat_radius",      1.0,   5.0,  10.0,   80.0),
+    _MenuItem("Sailfish repro",  "sailfish_eat_threshold",   1.0,   5.0,   0.0,   75.0),
+    _MenuItem("Sailfish starve", "sailfish_starvation_time", 5.0,  30.0,   0.0,  600.0),
+    _ToggleItem("SF starvation", "sailfish_starvation_enabled"),
+    _ToggleItem("SF repro",      "sailfish_reproduction_enabled"),
+
     _SaveRow(),
 ]
 
