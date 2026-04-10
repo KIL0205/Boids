@@ -1,7 +1,7 @@
 # Project Memory — Boids Ecosystem Simulation
 
 ## Project
-Real-time 2D boid ecosystem. `python main.py` to run. `python -m unittest tests.tests` for tests (246). `python bench.py` for benchmarks (4 scenarios).
+Real-time 2D boid ecosystem. `python main.py` to run. `python -m unittest tests.tests` for tests (268). `python -m tests.bench` for benchmarks (4 scenarios).
 
 ## Key Locations
 - `sim/spatial_hash.py` — SpatialHash: insert/query/query_first/query_position
@@ -11,26 +11,27 @@ Real-time 2D boid ecosystem. `python main.py` to run. `python -m unittest tests.
 - `sim/simulation.py` — Simulation: grid rebuild, update loop, ecology pass, `_batch_integrate_sardines()`
 - `sim/boid.py` — Boid base class: _gx/_gy/_gvx/_gvy cached floats; `_idx` for batch array row
 - `bench.py` — headless benchmark, --profile for cProfile, --test for CI thresholds
-- `tests/tests.py` — 246 tests, 21 suites
+- `tests/tests.py` — 268 tests, 23 suites
 
 ## Optimization History
 - **Phase 3C**: Added `_gx/_gy/_gvx/_gvy` Python-float cache on each boid in `insert()`. Eliminated numpy scalar dispatch in all inner loops. ~50% speedup.
 - **Phase 3D**: Inlined cell traversal in sardine flocking + flee + algae flocking. Eliminates: (1) `results=[]` allocation, (2) N `list.append` calls, (3) second loop re-computing dx/dy/d_sq. Added `query_first()` for sailfish eating. Cached `_coh_r2/_flee_r2/_coh_span/_flee_span`. ~14–22% additional speedup.
-- **Phase 4A** (latest): Added `_s_pos`, `_s_vel`, `_s_acc`, `_s_n` arrays to `Simulation`. At start of each `update()`, populate arrays from `_gx/_gy/_gvx/_gvy` caches and assign `s._idx` per sardine. Capacity 2× growth policy.
-- **Phase 4B** (latest): Split per-sardine `agent.update(dt)` into `s._compute_forces()` + `_batch_integrate_sardines(dt)`. Vectorised Euler, speed clamp, boundary wrap. Eliminated `boid.update()` dispatch for sardines (374k→21k calls); net −5% profiled frame time.
+- **Phase 4A**: Added `_s_pos`, `_s_vel`, `_s_acc`, `_s_n` arrays to `Simulation`. At start of each `update()`, populate arrays from `_gx/_gy/_gvx/_gvy` caches and assign `s._idx` per sardine. Capacity 2× growth policy.
+- **Phase 4B**: Split per-sardine `agent.update(dt)` into `s._compute_forces()` + `_batch_integrate_sardines(dt)`. Vectorised Euler, speed clamp, boundary wrap. Eliminated `boid.update()` dispatch for sardines; net −5% profiled frame time.
+- **Phase 4C (current)**: `_batch_compute_sardine_forces()` replaces per-sardine Python loop for N≥500. Three vectorised passes: (1) sardine–sailfish flee, (2) per-cell pairwise sep/ali/coh via numpy broadcasting, (3) batch noise. Fallback to per-sardine loop for N<500. +2.27× at heavy, +2.89× at extreme.
 
-## Current Bottleneck (post-4B)
-`sardine._compute_forces()` Python loop dominates (~65% of profiled time). Next step: **Phase 4C** — vectorise the cell traversal inside `_compute_forces()` using the `_s_pos/_s_vel` arrays from Phase 4A.
-
-## Benchmarks (Phase 4B, Apple Silicon Python 3.13)
+## Benchmarks (Phase 4C, Apple Silicon Python 3.13)
 | Scenario | ms/frame |
 |---|---|
-| light (300s, 600a, 5sf) | ~3.5 |
-| medium (800s, 800a, 8sf) | ~10.6 |
-| heavy (1500s, 1200a, 10sf) | ~22 |
-| extreme (2000s, 1200a, 10sf) | ~31 |
+| light (300s, 600a, 5sf) | ~3.6 |
+| medium (800s, 800a, 8sf) | ~8.4 |
+| heavy (1500s, 1200a, 10sf) | ~11.6 |
+| extreme (2000s, 1200a, 10sf) | ~14.9 |
 
-## Batch Array Design (Phase 4A/4B)
+## Current Bottleneck (post-4C)
+Cell-bucket Python sweep in `_batch_compute_sardine_forces()` — `dict.get` + `list.append`
+building `neigh_list` per cell. Phase 4D: pre-build CSR flat sardine-index array during grid
+rebuild so neighbour rows can be gathered with a single slice.
 - `Simulation._s_pos/vel/acc`: (N,2) float64 arrays, capacity 2× growth
 - `Simulation._s_n`: live sardine count (slice bound for all numpy ops)
 - `Boid._idx`: row index in batch arrays, set at start of each update() frame

@@ -457,3 +457,281 @@ Added sailfish reproduction mirroring sardine reproduction: `food_counter >= sai
 ### Test suites added (Phase 8)
 
 `TestAlgaeKinematics`, `TestEcologyContactDetection`, `TestSardineReproduction`, `TestSailfishEcology`, `TestSardineStarvation`, `TestSailfishStarvation`, `TestAlgaeRespawn`, `TestHudEcosystem`, `TestConfigMenuEcosystem`, `TestSailfishReproduction` — 132 tests added to the original 53, totalling 185.
+
+---
+
+## Optimization Passes — Phases 1–4C (April 2026)
+
+> Migrated from PROJECT_LOG.md. These sections document the bottleneck analysis, rationale,
+> and benchmark results for each optimization pass. Final results and current scaling limits
+> live in PROJECT_LOG.md §7.
+
+---
+
+### Phase 1 — Micro-optimisations
+
+Full performance analysis at ~300 sardines / 800 algae / 8 sailfish. Phase 1 targeted safe,
+incremental micro-optimisations — no architectural changes.
+
+**Performance issues identified**
+
+| Issue | Category | Impact |
+|---|---|---|
+| `v += a*dt` / `p += v*dt` each allocate a `(2,)` float64 temp array | Allocation hotspot | High |
+| `self._config.boundary == "wrap"` per agent per frame | Redundant computation | Medium |
+| `float(other.position[0/1])` — two separate LOAD_ATTR per neighbour | Repeated attribute access | High |
+| `float(other.velocity[0/1])` in alignment inner loop | Repeated attribute access | Medium |
+| `query()` allocates fresh `[]` even for empty results | Allocation hotspot | Medium |
+| `np.random.default_rng()` on every `_spawn_algae_batch()` call | Object creation | Low |
+| Generator expressions in 4 `set.update()` ecology calls | Minor overhead | Low |
+
+**Changes applied**
+
+1. **Scalar Euler integration** (`boid.py`): `v[0] += a[0]*dt` element ops instead of `v += a*dt` array temps (~2 allocs/agent/frame saved).
+2. **`_boundary_wrap` bool cache** (`boid.py`): cached once at init / `apply_config()`; replaces string comparison per frame.
+3. **Neighbour-loop attribute caching** (`sardine.py`, `algae.py`, `sailfish.py`): `opos = other.position` once per neighbour; halves LOAD_ATTR. Same for `other.velocity`.
+4. **`_EMPTY_LIST` sentinel** (`spatial_hash.py`): shared module-level `[]` returned for empty queries — eliminates ~1 500 list allocs/frame when sardines query sparse sailfish grid.
+5. **Persistent `_respawn_rng`** (`simulation.py`): `np.random.default_rng()` called once at init; reused.
+6. **`map(id, …)` in ecology set updates**: C-level iteration in all four `set.update()` calls.
+
+214 tests pass. Estimated gain: ~5–10% frame-time reduction at 1 500 sardines.
+
+---
+
+### Phase 2A — Structural Fixes
+
+**Bottlenecks from Phase 1 profile**
+
+| Bottleneck | Notes |
+|---|---|
+| `visited: set` allocated on every `query()` — 4 200+/frame | Dominant allocator |
+| `other.position` accessed twice in `query()` inner loop | Per-candidate |
+| `agent.position` accessed twice in `insert()` | Per-insert |
+| `self.velocity/max_force/acceleration` in `_steer_apply_xy` (3–5×/sardine/frame) | Repeated attr access |
+| `self._grid.insert(s)` — two LOAD_ATTR per insert in N-long rebuild loop | Repeated attr chain |
+| `float()` wrappers on `velocity[0/1]` inside `_steer_apply_xy` | Unnecessary conversion |
+
+**Changes applied**
+
+1. **`query()` fast-path — skip `visited` set** (`spatial_hash.py`): When `nc > 2·span` and `nr > 2·span` (always true for production worlds), the `(2·span+1)²` cell keys are distinct after mod reduction; no set needed. Slow path preserved for tiny test worlds.
+2. **Cache `agent.position` / `other.position`** (`spatial_hash.py`): one ref, two index ops per insert/query.
+3. **Locals in `_steer_apply_xy`** (`boid.py`): `vel`, `max_f`, `acc` cached per call; `float()` wrappers removed.
+4. **Bind grid insert methods as locals** (`simulation.py`): `_insert = self._grid.insert`; saves 2 LOAD_ATTR/iteration.
+
+Estimated cumulative impact with Phase 1: eliminated ~4 200 `set()` allocs/frame; ~45 000 fewer LOAD_ATTR/frame at 1 500 sardines.
+
+**Important caveat**: Removing `float()` at numpy element extraction introduced a performance regression (see Phase 3 below). Phase 2A itself was correct but exposed this class of bug more clearly.
+
+---
+
+### Phase 3 — Regression Diagnosis + Benchmark Infrastructure
+
+After Phase 2A, runtime performance was **worse** than before (despite passing all tests).
+
+**Root cause: numpy scalar arithmetic in hot paths**
+
+Removing `float()` conversions at numpy array element boundaries leaves results as `numpy.float64`.
+Any arithmetic on a `numpy.float64` routes through numpy's ufunc dispatch machinery (~2–4× slower
+than CPython native float per operation).
+
+The hot paths affected: `_steer_apply_xy` (~42 000 ops/frame), `sardine._compute_forces` inner loop
+(~180 000 ops/frame at 1 500 sardines), `algae._compute_forces`, `sailfish._compute_forces` COM loop.
+
+**Correct pattern**:
+```python
+# One LOAD_ATTR (cache benefit) + float() to enter Python float path
+_pos = self.position
+px = float(_pos[0])
+```
+
+Both caching the reference AND converting the element are required. Each alone is slower.
+
+**Fix applied**: Restored `float()` at all numpy element extraction points in the four hot-path
+files, while keeping the array-reference caching from Phase 1/2A.
+
+**Lesson**:
+| Pattern | Correct approach |
+|---|---|
+| Cache array ref for multiple accesses | `_pos = self.position` (saves 1 LOAD_ATTR) |
+| Extract element for arithmetic | `px = float(_pos[0])` (enters Python float path) |
+| Never skip `float()` to save one call | Always add at extraction, even if "redundant" |
+| Correctness tests ≠ performance tests | Add `bench.py --test` to CI to detect regressions |
+
+**`tests/bench.py` — Benchmark Infrastructure** (added this phase)
+
+Headless benchmark; no pyglet window. `Simulation.update()` driven directly.
+
+Usage: `python -m tests.bench [--profile] [--test] [--frames N]`
+
+Scenarios: light (300s/600a/5sf), medium (800s/800a/8sf), heavy (1500s/1200a/10sf),
+extreme (2000s/1200a/10sf). Each runs 60 warmup frames then N timed frames (default 300).
+
+**Post-fix baseline (Phase 3, Apple Silicon Python 3.13, 300 frames)**
+
+| Scenario | ms/frame | fps-equiv |
+|---|---|---|
+| light (300s) | 6.82 | 147 |
+| medium (800s) | 26.45 | 38 |
+| heavy (1 500s) | 55.92 | 18 |
+| extreme (2 000s) | 87.79 | 11 |
+
+---
+
+### Phase 3C — Position/Velocity Pre-caching (`_gx/_gy/_gvx/_gvy`)
+
+**Profiler output (heavy, 300 frames)**
+
+| Function | tottime | % total |
+|---|---|---|
+| `spatial_hash.query()` | 12.086 s | 51% |
+| `sardine._compute_forces()` | 7.467 s | 31.6% |
+| `list.append` | 0.979 s | 4.1% |
+| `boid._steer_apply_xy()` | 0.634 s | 2.7% |
+
+`query()` alone was 51% of total. Dominant cost per candidate-pair check: `other.position`
+(LOAD_ATTR → numpy array) + `[0]/[1]` (numpy subscript → numpy.float64 scalar) → numpy dispatch
+on every subsequent arithmetic expression.
+
+**Solution: pre-cache Python floats on each Boid during grid insert**
+
+`insert()` already computes `ax = float(apos[0])` for cell-address. Also store:
+```python
+agent._gx = ax;  agent._gy = ay          # position (free — already computed)
+agent._gvx = float(avel[0]); agent._gvy = float(avel[1])   # velocity
+```
+
+All query inner loops and species flocking loops then use `other._gx` / `other._gy` / `_gvx` / `_gvy`
+— pure Python-float arithmetic, zero numpy dispatch.
+
+Also inlined `_steer_apply_xy` into sardine/algae `_compute_forces` (eliminated 4 Python call
+overheads per fish per frame) with shared locals `_vx/_vy/_ms/_mf/_acc`.
+
+**Benchmark results (Phase 3 baseline → Phase 3C)**
+
+| Scenario | Before | After | Improvement |
+|---|---|---|---|
+| light (300s) | 6.82 ms | 3.97 ms | −42% |
+| medium (800s) | 26.45 ms | 12.77 ms | −52% |
+| heavy (1 500s) | 55.92 ms | 25.95 ms | −54% |
+| extreme (2 000s) | 87.79 ms | 40.48 ms | −54% |
+
+214/214 tests pass.
+
+---
+
+### Phase 3D — Inline Cell Traversal (eliminate double dx/dy computation)
+
+**Bottleneck identification (post-3C, heavy, 300 frames)**
+
+| Function | tottime | ncalls | Share |
+|---|---|---|---|
+| `spatial_hash.query()` | 6.36s | 1,072,524 | 48% |
+| `sardine._compute_forces()` | 3.48s | 344,489 | 26% |
+| `list.append` | 0.95s | 22.1M | 7% |
+
+**Root cause**: double dx/dy computation — `query()` computed dx/dy/d_sq to accept a candidate
+into `results`, then `_compute_forces` iterated `results` and recomputed dx/dy/d_sq for
+sep/ali/coh accumulation. Every accepted neighbour's geometry was computed twice.
+
+**Changes**
+
+1. **Inline sardine flocking cell traversal** (`sardine.py`): replaced `query()` + loop with direct
+   `_grid._cells` walk, computing dx/dy once and accumulating sep/ali/coh in the same pass.
+   Eliminates: `results=[]`, N `list.append`, second loop. List.append calls dropped from
+   22M/300-frames to 2.4M/300-frames.
+2. **Inline sardine flee traversal**: same approach on `_sailfish_grid`.
+3. **Inline algae flocking traversal** (`algae.py`): same as sardine.
+4. **`query_first()`** (`spatial_hash.py`): new method for sailfish one-kill-per-tick —
+   stops at first qualifying neighbour.
+5. **Radius-squared and span caches**: `_coh_r2`, `_flee_r2`, `_coh_span`, `_flee_span` added
+   to sardine/algae; all refreshed in `apply_config()`.
+
+**Benchmark results (Phase 3C → Phase 3D)**
+
+| Scenario | Before | After | Improvement |
+|---|---|---|---|
+| light (300s) | 4.19 ms | 3.60 ms | −14% |
+| medium (800s) | 13.82 ms | 10.74 ms | −22% |
+| heavy (1 500s) | 28.20 ms | 22.53 ms | −20% |
+| extreme (2 000s) | 39.27 ms | 33.82 ms | −14% |
+
+231/231 tests pass. 17 new tests added (`TestQueryFirst` × 10, `TestInlineTraversalCorrectness` × 7).
+
+**Why improvement smaller at extreme (2 000s)**: ecology dynamics cause large population swings
+late in the run (sardines eaten/starved), shifting cost to ecology and sailfish paths.
+
+---
+
+### Phase 4A/4B — Batch Array Infrastructure + Vectorised Integration
+
+**Profiler (heavy, 300 frames, post-3D)**
+
+`sardine._compute_forces()` = **65% of total**. Integration overhead (`boid.update` +
+`_clamp_speed` + `_apply_boundary` + `wrap_position`) = ~5%.
+
+**Phase 4A — Batch array infrastructure** (`simulation.py`)
+
+Added `(N, 2)` float64 arrays `_s_pos`, `_s_vel`, `_s_acc` and live count `_s_n`.
+At start of each `update()`, populate from `_gx/_gy/_gvx/_gvy` (already Python floats from
+insert) and assign `sardine._idx`. Capacity 2× growth policy via `_ensure_sardine_capacity()`.
+Deaths/births handled by re-assigning indices at start of each frame — no stale refs possible.
+
+**Phase 4B — Vectorised Euler integration** (`simulation.py`)
+
+`_batch_integrate_sardines(dt)` replaces per-sardine `boid.update()`:
+- Gather: `_s_acc[i] = s.acceleration` (Python loop, fast numpy writes)
+- Vectorised vel integration + speed clamp (`np.hypot`, masks) + pos integration + boundary wrap
+- Scatter: write `_s_pos[i]`, `_s_vel[i]` back; clear `s.acceleration`
+
+`boid.update()` ncalls: 374k (sardine+sf+algae) → 21k (sf+algae only). Integration overhead:
+~0.50s → ~0.15s.
+
+**Benchmark (Phase 3D → Phase 4B)**
+
+Net gain ~5% overall. Bottleneck (`_compute_forces`) unchanged — Phase 4B eliminates the
+integration overhead, but the loop itself remains the ceiling.
+
+**Establishes Phase 4C infrastructure**: `_s_pos[:n]`, `_s_vel[:n]`, `_s_n`, `sardine._idx`
+all ready for vectorised neighbour search.
+
+246/246 tests pass. 15 new tests (`TestPhase4Batching`).
+
+---
+
+### Phase 4C — Numpy Cell-Bucket Vectorised Force Computation
+
+**Profiler (heavy, 200 frames, post-4B)**
+
+`sardine._compute_forces()` = **69.5%** of total (5.075s). Integration confirmed eliminated.
+
+**Algorithm** (`simulation._batch_compute_sardine_forces()`)
+
+- **Pass 1 — Flee (vectorised N×S)**: all N sardines vs all S sailfish in one numpy block.
+  Toroidal correction, distance gate, unit-away accumulation. `is_fleeing` mask computed.
+- **Pass 1b — Mouse flee**: same pattern against single cursor point.
+- **Pass 2 — Cell-bucket flocking**: Python loop over occupied cells only (not sardines).
+  Per cell: collect `own_idxs` (M sardines) and `neigh_idx` (K neighbours); compute `(M,K)` pairwise
+  dx/dy via broadcasting; apply distance-squared gate + sep/ali/coh masks; accumulate into `_s_acc`.
+- **Pass 3 — Noise**: single `np.random.normal(0, 1, (n, 2))` call.
+- **Fallback N<500**: per-sardine Python loop (numpy overhead exceeds interpreter cost at small N).
+
+**Benchmark results (Phase 4B → Phase 4C)**
+
+| Scenario | Before | After | Speedup |
+|---|---|---|---|
+| light (300s) | 3.51 ms | 3.61 ms | ~1× (fallback path) |
+| medium (800s) | 11.07 ms | 8.39 ms | +1.32× |
+| heavy (1 500s) | 26.44 ms | 11.63 ms | **+2.27×** |
+| extreme (2 000s) | 42.92 ms | 14.86 ms | **+2.89×** |
+
+255/255 tests pass. 9 new tests (`TestPhase4CBatchedForces`).
+
+**New dominant bottleneck post-4C**: cell-bucket Python sweep overhead (`dict.get` + `list.append`
+building `neigh_list` per cell) — ~40–50% of frame time. Phase 4D would pre-build a CSR flat
+sardine-index array during grid rebuild so neighbour rows can be gathered with a single slice.
+
+**Lessons**
+
+- Phase 4C speedup is load-dependent: N<500 fallback path means light scenario unchanged.
+- Per-cell Python loop still exists; vectorisation only eliminates the per-sardine level.
+- The crossover (where numpy overhead > Python loop) is ~500 sardines on Apple Silicon M-series.
