@@ -110,6 +110,10 @@ class Sardine(Boid):
         self.food_counter: float = 0.0
         self.hunger_timer: float = config.sardine_initial_hunger_time
 
+        # Liveness flag — set to False by Simulation when this sardine is eaten
+        # or starved so sailfish can detect target death without querying the grid.
+        self.is_alive: bool = True
+
     # ── Flocking rules ────────────────────────────────────────────────
 
     def _compute_forces(self) -> None:

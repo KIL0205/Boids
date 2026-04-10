@@ -94,6 +94,19 @@ class Sailfish(Boid):
         self._sf_ali_r2: float = config.radius_sailfish_alignment ** 2
         self._sf_coh_r2: float = config.radius_sailfish_cohesion ** 2
 
+        # Individual prey targeting state.
+        # _target_sardine: the locked individual sardine (or None).
+        # _target_lock_timer: seconds remaining on the current lock.  Decremented
+        #   by Simulation each frame alongside hunger_timer.
+        self._target_sardine: "object | None" = None
+        self._target_lock_timer: float = 0.0
+
+        # Burst attack state (Phase 2).
+        # _burst_timer:          seconds remaining in current burst (0 = not bursting).
+        # _burst_cooldown_timer: seconds until next burst allowed (0 = ready).
+        self._burst_timer:          float = 0.0
+        self._burst_cooldown_timer: float = 0.0
+
         # Ecology: feeding state (Phase 8.6 / 8.7)
         self.food_counter: float = 0.0   # sardines eaten; carries toward future use
         # Every new sailfish — startup, manually added, or reproduced — starts
@@ -102,25 +115,48 @@ class Sailfish(Boid):
         # regardless of what sailfish_starvation_time is saved in the config.
         self.hunger_timer: float = 0.0
 
+    # ── Burst speed override ───────────────────────────────────────────
+
+    def update(self, dt: float) -> None:
+        """Apply burst speed/force caps while bursting, then delegate to Boid.update."""
+        cfg = self._config
+        if self._burst_timer > 0.0:
+            self.max_speed = cfg.sailfish_max_speed * cfg.sailfish_burst_speed_mult
+            self.max_force = cfg.sailfish_max_force * cfg.sailfish_burst_force_mult
+        else:
+            # Restore base values so they reflect any live config changes.
+            self.max_speed = cfg.sailfish_max_speed
+            self.max_force = cfg.sailfish_max_force
+        super().update(dt)
+
     # ── Force computation ──────────────────────────────────────────────
 
     def _compute_forces(self) -> None:
-        """Apply pursuit (sardine COM) and sailfish-to-sailfish flocking forces.
+        """Apply pursuit and sailfish-to-sailfish flocking forces.
 
-        Pursuit algorithm
+        Hunting algorithm (two-stage)
+        ------------------------------
+        **Long range** — when no individual target is locked, query the sardine
+        grid and steer toward the sardine school centre of mass (COM).
+
+        **Close range** — when a sardine enters
+        ``sailfish_target_acquire_radius``, lock onto the nearest one and
+        switch to predictive interception: steer toward
+
+            predicted_pos = target.pos + target.vel * t
+
+        where ``t = min(dist / max_speed, 0.5)`` is a capped look-ahead.
+        This steers slightly *ahead* of the prey rather than directly at its
+        current position, giving smooth, realistic interception curves.
+
+        The lock is released when:
+          * The target sardine is no longer alive (eaten or starved).
+          * The target drifts beyond ``sailfish_target_drop_radius``.
+          * ``_target_lock_timer`` reaches 0 (decremented by simulation.py).
+
+        Sailfish flocking
         -----------------
-        1. Query the sardine spatial hash within ``radius_sailfish_awareness``.
-        2. If sardines found: compute toroidal COM offset and steer toward it.
-        3. If no sardines visible: no pursuit force; sailfish drifts at
-           min_speed.
-
-        Sailfish flocking algorithm
-        ---------------------------
-        Runs only when ``_sailfish_grid`` is not ``None``.
-        Queries the sailfish grid once using the largest of the three flocking
-        radii (cohesion).  Sub-radius checks for separation and alignment are
-        applied inline, matching the pattern in ``sardine._compute_forces``.
-        SpatialHash.query() already excludes ``self`` from results.
+        Runs after pursuit; unchanged from the previous implementation.
         """
         cfg = self._config
         W   = self._W
@@ -131,21 +167,108 @@ class Sailfish(Boid):
         px   = float(_pos[0])
         py   = float(_pos[1])
 
-        # ── Pursuit: steer toward sardine centre of mass ──────────────
-        sardines = self._sardine_grid.query(self, cfg.radius_sailfish_awareness)
-        if sardines:
-            cx = cy = 0.0
-            for s in sardines:
-                dx = s._gx - px
-                dy = s._gy - py
+        # ── Individual target lock validation ─────────────────────────
+        tgt = self._target_sardine
+        if tgt is not None:
+            # Drop if sardine was eaten/starved or lock timer expired.
+            if not tgt.is_alive or self._target_lock_timer <= 0.0:
+                tgt = None
+                self._target_sardine = None
+            else:
+                # Drop if target has drifted beyond the drop radius (toroidal).
+                dx = tgt._gx - px
+                dy = tgt._gy - py
                 if dx >  hw: dx -= W
                 elif dx < -hw: dx += W
                 if dy >  hh: dy -= H
                 elif dy < -hh: dy += H
-                cx += dx
-                cy += dy
-            n = len(sardines)
-            self._steer_apply_xy(cx / n, cy / n, cfg.weight_pursuit)
+                drop_r = cfg.sailfish_target_drop_radius
+                if dx * dx + dy * dy > drop_r * drop_r:
+                    tgt = None
+                    self._target_sardine = None
+
+        # ── Pursuit: individual target or school COM ───────────────────
+        if tgt is not None:
+            # ── Predictive interception toward locked individual sardine ──
+            dx = tgt._gx - px
+            dy = tgt._gy - py
+            if dx >  hw: dx -= W
+            elif dx < -hw: dx += W
+            if dy >  hh: dy -= H
+            elif dy < -hh: dy += H
+            dist = math.sqrt(dx * dx + dy * dy)
+            # Burst trigger: target is close, burst not active, and not cooling down.
+            if (dist < cfg.sailfish_burst_trigger_radius
+                    and self._burst_timer <= 0.0
+                    and self._burst_cooldown_timer <= 0.0):
+                self._burst_timer = cfg.sailfish_burst_duration
+            if dist > 1.0:
+                t   = min(dist / self.max_speed, 0.5)   # cap look-ahead at 0.5 s
+                pdx = dx + tgt._gvx * t
+                pdy = dy + tgt._gvy * t
+            else:
+                pdx, pdy = dx, dy
+            self._steer_apply_xy(pdx, pdy, cfg.weight_target_pursuit)
+
+        else:
+            # ── No locked target: query sardines for acquisition or COM ──
+            sardines = self._sardine_grid.query(self, cfg.radius_sailfish_awareness)
+            if sardines:
+                # Single pass: accumulate COM and find nearest within acq_r.
+                acq_r2  = cfg.sailfish_target_acquire_radius ** 2
+                best_d2 = 1e18
+                best_s  = None
+                alt_d2  = 1e18
+                alt_s   = None
+                cx = cy = 0.0
+                for s in sardines:
+                    dx = s._gx - px
+                    dy = s._gy - py
+                    if dx >  hw: dx -= W
+                    elif dx < -hw: dx += W
+                    if dy >  hh: dy -= H
+                    elif dy < -hh: dy += H
+                    cx += dx
+                    cy += dy
+                    d2 = dx * dx + dy * dy
+                    if d2 < acq_r2:
+                        if d2 < best_d2:
+                            alt_d2, alt_s = best_d2, best_s
+                            best_d2, best_s = d2, s
+                        elif d2 < alt_d2:
+                            alt_d2, alt_s = d2, s
+
+                if best_s is not None:
+                    # Shared-target reduction: soft preference to avoid multiple
+                    # sailfish locking the same sardine when an alternative exists.
+                    if self._sailfish_grid is not None and alt_s is not None:
+                        sf_nb = self._sailfish_grid.query(
+                            self, cfg.sailfish_target_acquire_radius
+                        )
+                        if any(other._target_sardine is best_s for other in sf_nb):
+                            best_s = alt_s
+                    # Lock onto chosen sardine; apply predictive pursuit.
+                    self._target_sardine    = best_s
+                    self._target_lock_timer = cfg.sailfish_target_lock_time
+                    dx = best_s._gx - px
+                    dy = best_s._gy - py
+                    if dx >  hw: dx -= W
+                    elif dx < -hw: dx += W
+                    if dy >  hh: dy -= H
+                    elif dy < -hh: dy += H
+                    dist = math.sqrt(dx * dx + dy * dy)
+                    if dist > 1.0:
+                        t   = min(dist / self.max_speed, 0.5)
+                        pdx = dx + best_s._gvx * t
+                        pdy = dy + best_s._gvy * t
+                    else:
+                        pdx, pdy = dx, dy
+                    self._steer_apply_xy(pdx, pdy, cfg.weight_target_pursuit)
+
+                else:
+                    # No sardine close enough to lock — steer toward school COM.
+                    n = len(sardines)
+                    self._steer_apply_xy(cx / n, cy / n, cfg.weight_pursuit)
 
         # ── Sailfish flocking: separation / alignment / cohesion ──────
         if self._sailfish_grid is None:

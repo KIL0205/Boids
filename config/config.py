@@ -109,8 +109,39 @@ class SimConfig:
     # How far a sailfish can see sardines.
     radius_sailfish_awareness: float = 200.0  # px
 
-    # Multiplier on the Reynolds pursuit steer force.
+    # Multiplier on the Reynolds pursuit steer force (long-range COM chase).
     weight_pursuit: float = 1.5
+
+    # ── Sailfish individual prey targeting ────────────────────────────
+    # When a sardine enters sailfish_target_acquire_radius, the sailfish locks
+    # onto that individual and pursues it with predictive interception rather
+    # than chasing the school COM.  The COM chase (weight_pursuit) is used
+    # when no individual target is locked.
+    #
+    # acquire_radius: sardine must be closer than this for a lock to form (px).
+    # drop_radius:    lock is released if the target strays beyond this (px).
+    # lock_time:      lock auto-expires after this many seconds; the sailfish
+    #                 then re-evaluates and may pick a new target.
+    # weight_target_pursuit: steer force multiplier for individual pursuit;
+    #                 slightly higher than weight_pursuit for a more decisive
+    #                 close-in attack vs the softer long-range approach.
+    sailfish_target_acquire_radius: float = 150.0   # px
+    sailfish_target_drop_radius:    float = 260.0   # px
+    sailfish_target_lock_time:      float = 4.0     # s
+    weight_target_pursuit:          float = 2.0
+
+    # ── Sailfish burst attack mode ────────────────────────────────────
+    # When a sailfish has a valid individual target within
+    # ``sailfish_burst_trigger_radius`` it may enter burst mode for
+    # ``sailfish_burst_duration`` seconds, temporarily scaling its max_speed
+    # and max_force by the multipliers below.  After the burst ends a
+    # cooldown of ``sailfish_burst_cooldown`` seconds must pass before
+    # another burst can fire.  Set burst_duration=0.0 to disable entirely.
+    sailfish_burst_trigger_radius:  float = 90.0    # px; locked target closer than this → trigger
+    sailfish_burst_duration:        float = 0.6     # s; how long one burst lasts
+    sailfish_burst_cooldown:        float = 2.5     # s; recovery gap between bursts
+    sailfish_burst_speed_mult:      float = 1.45    # multiplier on sailfish_max_speed
+    sailfish_burst_force_mult:      float = 1.8     # multiplier on sailfish_max_force
 
     # ── Sailfish flocking (sailfish-vs-sailfish interactions) ─────────────
     # Separation is the primary mechanism — spreads sailfish around prey

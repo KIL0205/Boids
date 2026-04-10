@@ -158,6 +158,15 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     _MenuItem("Pursuit radius",  "radius_sailfish_awareness",5.0,  50.0,  50.0,  400.0),
     _MenuItem("Sailfish speed",  "sailfish_max_speed",      10.0,  50.0,  50.0,  600.0),
     _MenuItem("Sailfish force",  "sailfish_max_force",      10.0,  50.0,  10.0,  600.0),
+    _MenuItem("Acquir radius",   "sailfish_target_acquire_radius", 5.0, 50.0, 20.0, 400.0),
+    _MenuItem("Drop radius",     "sailfish_target_drop_radius",    5.0, 50.0, 20.0, 600.0),
+    _MenuItem("Lock time",       "sailfish_target_lock_time",      0.5,  1.0,  0.0,  30.0),
+    _MenuItem("Target wt",       "weight_target_pursuit",          0.1,  1.0,  0.0,  10.0),
+    _MenuItem("Burst trig r",    "sailfish_burst_trigger_radius",  5.0, 50.0, 10.0, 300.0),
+    _MenuItem("Burst duration",  "sailfish_burst_duration",        0.1,  0.5,  0.0,   5.0),
+    _MenuItem("Burst cooldown",  "sailfish_burst_cooldown",        0.5,  1.0,  0.0,  15.0),
+    _MenuItem("Burst spd mult",  "sailfish_burst_speed_mult",      0.05, 0.1,  1.0,   3.0),
+    _MenuItem("Burst frc mult",  "sailfish_burst_force_mult",      0.1,  0.5,  1.0,   4.0),
     _GroupRow("ECOSYSTEM"),
 
     # ─ Algae respawn ──────────────────────────────────────────────

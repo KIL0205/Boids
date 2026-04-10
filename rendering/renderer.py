@@ -285,8 +285,8 @@ class PopGraph:
     Geometry rebuild cost (~4 Hz): O(_GRAPH_MAX_DISPLAY_PTS) shape allocations.
     """
 
-    _W      = 680   # panel width  (px)
-    _H      = 340   # panel height (px)
+    _W      = 680 * 2   # panel width  (px)
+    _H      = 340 * 2  # panel height (px)
     _PAD    = 54    # left/bottom inner padding for plot area (px)
     _MARGIN = 16    # gap from window edge (px)
     _FONTS  = ["Menlo", "Consolas", "Courier New"]

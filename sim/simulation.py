@@ -403,6 +403,8 @@ class Simulation:
                 }
                 if starving:
                     self._sardines_starved_ids.update(map(id, starving))
+                    for _s in starving:
+                        _s.is_alive = False   # notify sailfish of target death
                     self.sardines = [s for s in self.sardines if s not in starving]
                     self.stats_sardine_starvations += len(starving)
 
@@ -420,6 +422,16 @@ class Simulation:
         if self.sailfish:
             for sf in self.sailfish:
                 sf.hunger_timer += dt
+                # Decrement individual-target lock timer (counts down to 0, then lock releases).
+                if sf._target_lock_timer > 0.0:
+                    sf._target_lock_timer = max(0.0, sf._target_lock_timer - dt)
+                # Burst timers: count down burst; start cooldown when burst expires.
+                if sf._burst_timer > 0.0:
+                    sf._burst_timer = max(0.0, sf._burst_timer - dt)
+                    if sf._burst_timer == 0.0:
+                        sf._burst_cooldown_timer = sf._config.sailfish_burst_cooldown
+                elif sf._burst_cooldown_timer > 0.0:
+                    sf._burst_cooldown_timer = max(0.0, sf._burst_cooldown_timer - dt)
 
         # Sailfish-sardine eating: one kill per sailfish per tick.
         # Runs after sardine reproduction so newly born sardines are not in
@@ -435,6 +447,8 @@ class Simulation:
                     sf.hunger_timer = 0.0
             if to_remove:
                 self._sardines_eaten_ids.update(map(id, to_remove))
+                for _s in to_remove:
+                    _s.is_alive = False   # notify sailfish of target death
                 self.sardines = [s for s in self.sardines if s not in to_remove]
                 self.stats_sardines_eaten += len(to_remove)
 
@@ -1123,6 +1137,12 @@ class Simulation:
             agent._sf_sep_r2 = new_config.radius_sailfish_separation ** 2
             agent._sf_ali_r2 = new_config.radius_sailfish_alignment  ** 2
             agent._sf_coh_r2 = new_config.radius_sailfish_cohesion   ** 2
+            # Clear individual target lock — acquisition/drop radii may have
+            # changed so stale targets are released; they will re-acquire next frame.
+            agent._target_sardine    = None
+            agent._target_lock_timer = 0.0
+            agent._burst_timer          = 0.0
+            agent._burst_cooldown_timer = 0.0
         for agent in self.algae:
             agent._config   = new_config
             agent._sep_r2   = new_config.radius_algae_separation ** 2
@@ -1197,6 +1217,8 @@ class Simulation:
         """
         n = min(max(n, 0), len(self.sardines))
         if n:
+            for _s in self.sardines[-n:]:
+                _s.is_alive = False   # release any sailfish target locks
             del self.sardines[-n:]
         self._sync_population_counts()
         return n
