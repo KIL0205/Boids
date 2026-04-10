@@ -17,6 +17,10 @@
 - Added mouse-as-predator interaction: left-click/drag scatters sardines; visual indicator; config menu exposed; 16 new tests (April 2026)
 - Optimization Phase 4A–4B (April 2026): batch sardine state arrays + vectorised integration; `boid.update()` calls for sardines eliminated; `_batch_integrate_sardines()` added; 15 new tests; test count 231 → 246.
 - Optimization Phase 4C (April 2026): numpy cell-bucket batched force computation; per-sardine `_compute_forces()` Python loop eliminated for N≥500; 9 new tests; test count 246 → 255.
+- Sailfish-to-sailfish flocking (April 2026): separation/alignment/cohesion forces on sailfish; new `SAILFISH FLOCKING` config menu section; 6 new `SimConfig` fields; `Sailfish._compute_forces()` restructured; all 3 spawn paths updated; 13 new tests; test count 259.
+- Population graph overlay (April 2026): `D` key toggles a 480×240 px semi-transparent graph panel (bottom-right); sardine/sailfish/algae populations plotted vs sim time; `collections.deque(maxlen=3600)` history sampled at ~1 Hz prevents unbounded growth; `PopGraph` class in `renderer.py`; `sim_time` and `pop_history` fields added to `Simulation`; no new tests needed (rendering-only overlay with trivial data collection).
+- Population graph compatibility fix (April 2026): `pyglet.shapes.Line` in pyglet 2.1.x uses `thickness=` not `width=`; passing a raw `width=` kwarg caused a `TypeError` crash on first `D` keypress. Fix: renamed to `thickness=1.5` and switched both `Line` and `Rectangle` to accept full RGBA 4-tuples directly (eliminating separate `.opacity` assignments). No behaviour change; line weight and alpha are identical.
+- Population graph performance + size overhaul (April 2026): enabling the graph caused a severe fps drop because the original `draw()` allocated up to 3×3600 `pyglet.shapes.Line` objects and 4 `pyglet.text.Label` objects **every frame** at 60 Hz, then immediately discarded them. Fix: (1) all line segments are now placed in a dedicated `pyglet.graphics.Batch` so the full graph submits as a single GL draw call; (2) geometry is rebuilt at most every 0.25 s (~4 Hz) via `time.monotonic()` throttle — background rect, labels, and tick-label text are cached between rebuilds; (3) displayed history is uniformly downsampled to ≤ 200 points; (4) panel enlarged from 480×240 to 680×340 px for readability. Remaining trade-off: geometry rebuild still allocates ~600 shapes at 4 Hz; visual updates lag up to 0.25 s behind the simulation, which is imperceptible at 1 Hz sampling.
 
 ---
 
@@ -25,7 +29,7 @@
 A 2D real-time Python simulation of sardine schooling and sailfish predation.
 
 - **Runtime**: `python main.py` — resizable window at screen resolution, 60 fps target.
-- **Tests**: `python -m tests.tests` — 255 tests, ~0.9 s.
+- **Tests**: `python -m tests.tests` — 259 tests, ~0.9 s.
 
 ### Current capabilities
 - Sardines flock using Reynolds separation / alignment / cohesion + small noise term.
@@ -42,6 +46,7 @@ A 2D real-time Python simulation of sardine schooling and sailfish predation.
 - Dynamic population controls from keyboard.
 - HUD overlay (FPS, frame timing, per-species counts, totals, full ecosystem event stats, average sardine/sailfish hunger).
 - **Mouse predator**: holding the left mouse button causes nearby sardines to flee the cursor — same flee mechanics as a real sailfish. A faint red radius indicator appears at the cursor. Configurable toggle, radius, and flee-weight multiplier.
+- **Population graph overlay**: `D` key toggles a live population-vs-time graph in the bottom-right corner. Sardines (cyan-blue), sailfish (orange-red), and algae (amber-brown) are plotted independently with a legend and axis labels. History is stored in `simulation.pop_history` (a `collections.deque` sampled at ~1 Hz; capped at 3600 points ≈ 1 hour).
 
 ### Tech stack
 - Python 3.13+, pyglet ≥ 2.1, numpy 2.x
@@ -95,11 +100,12 @@ Boids/
 | `SimConfig` | `config/config.py` | Frozen dataclass — single source of truth for all params |
 | `Boid` | `sim/boid.py` | Position/velocity/acceleration; `update(dt)`; `_steer_apply_xy()`; speed clamp; boundary |
 | `Sardine(Boid)` | `sim/sardine.py` | Flocking (sep/ali/coh/noise) + flee; holds sardine + sailfish grid refs; `food_counter`, `hunger_timer` |
-| `Sailfish(Boid)` | `sim/sailfish.py` | COM pursuit; holds sardine grid ref; coasts when no sardines visible; `food_counter`, `hunger_timer` |
+| `Sailfish(Boid)` | `sim/sailfish.py` | COM pursuit + sailfish-to-sailfish flocking (sep/ali/coh); holds sardine grid ref + sailfish grid ref; coasts when no sardines visible; `food_counter`, `hunger_timer` |
 | `Algae(Boid)` | `sim/algae.py` | Alignment-dominant drift entity; holds algae grid ref; no predator awareness |
 | `SpatialHash` | `sim/spatial_hash.py` | `insert()`, `query()`, `clear()`, `resize()` with toroidal cell-key wrapping |
 | `Simulation` | `sim/simulation.py` | Spawns agents; owns three grids; `update(dt)`, `resize()`, `apply_config()`; ecology pass |
-| `Renderer` | `rendering/renderer.py` | `reset()`, `draw()`, `on_resize()`, `toggle_hud()`; velocity-colour logic; algae/sardine/sailfish shapes |
+| `Renderer` | `rendering/renderer.py` | `reset()`, `draw()`, `on_resize()`, `toggle_hud()`, `toggle_pop_graph()`; velocity-colour logic; algae/sardine/sailfish shapes |
+| `PopGraph` | `rendering/renderer.py` | Population-vs-time graph overlay; reads `simulation.pop_history`; drawn outside the batch |
 | `ConfigMenu` | `config/config_menu.py` | `toggle()`, `handle_key()`, `draw()`, `on_resize()` |
 
 ### Data flow (one frame)
@@ -123,6 +129,7 @@ pyglet on_draw → Renderer.draw(simulation)
   ├─ _sync_shapes()  (sailfish)
   ├─ batch.draw()                                    ← one GL call
   ├─ Hud.draw()
+  ├─ PopGraph.draw()    (only when shown)
   └─ ConfigMenu.draw()  (no-op when closed)
 ```
 
@@ -155,7 +162,8 @@ pyglet on_draw → Renderer.draw(simulation)
 ### Runtime config menu
 - TAB toggles the overlay.  Simulation keeps running while open.
 - Modal guard: `handle_key()` returns `True` when open — population controls cannot fire.
-- **42 rows** across 8 group sections + 1 Save row.  Panel height is fixed at 418 px (`_VISIBLE_ROWS = 16`); rows scroll automatically as you navigate with ↑/↓.  Scroll indicators (▲/▼) appear in the footer strip when off-screen rows exist.
+- **49 rows** across 9 group sections + 1 Save row.  Panel height is fixed at 418 px (`_VISIBLE_ROWS = 16`); rows scroll automatically as you navigate with ↑/↓.  Scroll indicators (▲/▼) appear in the footer strip when off-screen rows exist.
+  - Sections: FLOCKING, PREDATION, ALGAE, VISUAL, MOUSE, SAILFISH FLOCKING, SAILFISH, ECOSYSTEM, SAILFISH ECOLOGY.
 - **Int field safety**: `sardine_eat_threshold` and `algae_max_count` are int fields in `SimConfig`.  `_adjust_value()` detects `isinstance(cur_typed, int)` and casts back to `int` before `dataclasses.replace()` to avoid a `TypeError` on the frozen dataclass.
 - `S` key (from any row) or Enter/←/→ on the Save row writes `boids_overrides.json`.
 - Resize-safe: `_build(w, h)` recreates all pyglet objects; panel y clamped to `max(0, py)`.
@@ -189,6 +197,7 @@ pyglet on_draw → Renderer.draw(simulation)
 | `V` | Cycle sardine colour mode (7 modes, not saved) |
 | `TAB` | Toggle config menu |
 | `H` | Toggle HUD overlay |
+| `D` | Toggle population graph overlay |
 | `F` | Toggle fullscreen (fires `on_resize` automatically) |
 | `ESC` | Quit (or close menu if open) |
 
@@ -321,6 +330,12 @@ All defaults live in `config/config.py` → `SimConfig` frozen dataclass. This i
 | `sailfish_max_force` | 200.0 | px/s² |
 | `radius_sailfish_awareness` | 200.0 | px |
 | `weight_pursuit` | 1.5 | |
+| `weight_sailfish_separation` | 3.0 | Sailfish-to-sailfish; stronger than sardine sep |
+| `weight_sailfish_alignment` | 0.5 | Mild heading match between sailfish |
+| `weight_sailfish_cohesion` | 0.0 | Off by default; pursuit handles grouping |
+| `radius_sailfish_separation` | 80.0 | px; ~2 body-lengths at sailfish_size=12 |
+| `radius_sailfish_alignment` | 150.0 | px |
+| `radius_sailfish_cohesion` | 150.0 | px |
 | `sardine_color_mode` | `"white"` | 7 modes |
 | `sailfish_color_mode` | `"default"` | 5 modes |
 | `vel_color_heading_weight` | 1.0 | |

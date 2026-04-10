@@ -146,6 +146,13 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     _ToggleItem("Mouse predator", "mouse_predator_enabled"),
     _MenuItem("Mouse radius",    "mouse_predator_radius",    5.0,  50.0,  20.0,  400.0),
     _MenuItem("Mouse flee wt",   "mouse_predator_flee_weight", 0.1, 0.5,  0.0,    5.0),
+    _GroupRow("SAILFISH FLOCKING"),
+    _MenuItem("SF sep weight",   "weight_sailfish_separation",  0.1,   1.0,   0.0,   10.0),
+    _MenuItem("SF sep radius",   "radius_sailfish_separation",  2.0,  20.0,   5.0,  200.0),
+    _MenuItem("SF ali weight",   "weight_sailfish_alignment",   0.1,   1.0,   0.0,   10.0),
+    _MenuItem("SF ali radius",   "radius_sailfish_alignment",   5.0,  50.0,  20.0,  400.0),
+    _MenuItem("SF coh weight",   "weight_sailfish_cohesion",    0.1,   1.0,   0.0,   10.0),
+    _MenuItem("SF coh radius",   "radius_sailfish_cohesion",    5.0,  50.0,  20.0,  400.0),
     _GroupRow("SAILFISH"),
     _MenuItem("Pursuit wt",      "weight_pursuit",           0.1,   1.0,   0.0,   10.0),
     _MenuItem("Pursuit radius",  "radius_sailfish_awareness",5.0,  50.0,  50.0,  400.0),
@@ -155,7 +162,7 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
 
     # ─ Algae respawn ──────────────────────────────────────────────
     # Live-effective: ecology pass reads these from self.config each frame.
-    _MenuItem("Algae respawn",   "algae_respawn_rate",       0.5,   5.0,   0.0,   75.0),
+    _MenuItem("Algae respawn",   "algae_respawn_rate",       2.0,   5.0,   0.0,   200.0),
     _MenuItem("Algae max",       "algae_max_count",         50.0, 200.0, 100.0, 5000.0),
     _MenuItem("Algae eat r",     "algae_eat_radius",         1.0,   5.0,   4.0,   50.0),
     # ─ Sardine ecology ─────────────────────────────────────────────
@@ -166,7 +173,7 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     # ─ Sailfish ecology ─────────────────────────────────────────────
     _MenuItem("Sailfish eat r",  "sailfish_eat_radius",      1.0,   5.0,  10.0,   80.0),
     _MenuItem("Sailfish starve", "sailfish_starvation_time", 5.0,  30.0,   0.0,  600.0),
-    _MenuItem("Sailfish repro",  "sailfish_eat_threshold",   1.0,   5.0,   0.0,   20.0),
+    _MenuItem("Sailfish repro",  "sailfish_eat_threshold",   1.0,   5.0,   0.0,   75.0),
     _ToggleItem("SF starvation", "sailfish_starvation_enabled"),
     _ToggleItem("SF repro",      "sailfish_reproduction_enabled"),
     _GroupRow("ALGAE DRIFT"),

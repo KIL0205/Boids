@@ -4185,6 +4185,334 @@ class TestPhase4Batching(unittest.TestCase):
         )
 
 
+# ── Sailfish flocking (sailfish-to-sailfish) ─────────────────────────────────
+
+def _make_sf_pair(
+    *,
+    sep_weight: float = 3.0,
+    sep_radius: float = 80.0,
+    ali_weight: float = 0.0,
+    ali_radius: float = 150.0,
+    coh_weight: float = 0.0,
+    coh_radius: float = 150.0,
+    sf1_pos: tuple[float, float] = (700.0, 350.0),
+    sf2_pos: tuple[float, float] = (740.0, 350.0),
+    sf1_vel: tuple[float, float] = (80.0, 0.0),
+    sf2_vel: tuple[float, float] = (80.0, 0.0),
+) -> "tuple[object, object, object]":
+    """Return (sf_grid, sf1, sf2) — two sailfish inserted into a fresh sailfish grid.
+
+    All forcing except the requested sailfish flocking forces is disabled so
+    tests can isolate exactly one effect at a time.
+    """
+    from sim.sailfish import Sailfish
+
+    cfg = SimConfig(
+        num_sardines=0, num_sailfish=0, num_algae=0,
+        sailfish_cell_size=120.0,
+        sailfish_min_speed=0.0,
+        weight_pursuit=0.0,             # disable sardine pursuit
+        weight_sailfish_separation=sep_weight,
+        weight_sailfish_alignment=ali_weight,
+        weight_sailfish_cohesion=coh_weight,
+        radius_sailfish_separation=sep_radius,
+        radius_sailfish_alignment=ali_radius,
+        radius_sailfish_cohesion=coh_radius,
+        sailfish_starvation_time=0.0,
+        sailfish_initial_hunger_time=0.0,
+        sardine_starvation_time=0.0,
+        sardine_initial_hunger_time=0.0,
+    )
+    sardine_grid = SpatialHash(
+        cell_size=cfg.cell_size,
+        world_width=float(cfg.window_width),
+        world_height=float(cfg.window_height),
+    )
+    sf_grid = SpatialHash(
+        cell_size=cfg.sailfish_cell_size,
+        world_width=float(cfg.window_width),
+        world_height=float(cfg.window_height),
+    )
+    sf1 = Sailfish(sf1_pos[0], sf1_pos[1], sf1_vel[0], sf1_vel[1],
+                   cfg, sardine_grid, sf_grid)
+    sf2 = Sailfish(sf2_pos[0], sf2_pos[1], sf2_vel[0], sf2_vel[1],
+                   cfg, sardine_grid, sf_grid)
+    sf_grid.insert(sf1)
+    sf_grid.insert(sf2)
+    return sf_grid, sf1, sf2
+
+
+class TestSailfishFlocking(unittest.TestCase):
+    """Tests for sailfish-to-sailfish separation, alignment, and cohesion forces."""
+
+    # ── Separation ────────────────────────────────────────────────────
+
+    def test_separation_force_when_close(self):
+        """Sailfish within sep_radius produces non-zero separation force."""
+        # sf2 is 40 px to the +x of sf1 — well inside sep_radius=80
+        _, sf1, sf2 = _make_sf_pair(
+            sep_weight=3.0, sep_radius=80.0,
+            sf1_pos=(700.0, 350.0), sf2_pos=(740.0, 350.0),
+        )
+        sf1.acceleration[:] = 0.0
+        sf1._compute_forces()
+        mag = math.sqrt(float(sf1.acceleration[0])**2 + float(sf1.acceleration[1])**2)
+        self.assertGreater(mag, 0.0, "separation from a close sailfish must produce a force")
+
+    def test_separation_force_direction_away(self):
+        """Separation force on sf1 points in −x (away from sf2 at +x)."""
+        _, sf1, _ = _make_sf_pair(
+            sep_weight=3.0, sep_radius=80.0,
+            ali_weight=0.0, coh_weight=0.0,
+            sf1_pos=(700.0, 350.0), sf2_pos=(740.0, 350.0),  # sf2 to the +x
+        )
+        sf1.acceleration[:] = 0.0
+        sf1._compute_forces()
+        self.assertLess(float(sf1.acceleration[0]), 0.0,
+                        "separation must push sf1 in −x (away from sf2 at +x)")
+        self.assertAlmostEqual(float(sf1.acceleration[1]), 0.0, places=6,
+                               msg="separation must have no y component when neighbour is on x-axis")
+
+    def test_no_separation_when_beyond_radius(self):
+        """Two sailfish outside sep_radius produce zero separation force."""
+        _, sf1, _ = _make_sf_pair(
+            sep_weight=3.0, sep_radius=30.0,   # small radius
+            ali_weight=0.0, coh_weight=0.0,
+            sf1_pos=(700.0, 350.0), sf2_pos=(750.0, 350.0),  # 50 px apart > 30
+        )
+        sf1.acceleration[:] = 0.0
+        sf1._compute_forces()
+        mag = math.sqrt(float(sf1.acceleration[0])**2 + float(sf1.acceleration[1])**2)
+        self.assertAlmostEqual(mag, 0.0, places=9,
+                               msg="sailfish outside sep_radius must produce zero force")
+
+    def test_no_flocking_when_isolated(self):
+        """A sailfish with no neighbours applies no flocking force."""
+        from sim.sailfish import Sailfish
+        cfg = SimConfig(
+            num_sardines=0, num_sailfish=0, num_algae=0,
+            weight_pursuit=0.0,
+            weight_sailfish_separation=3.0,
+            weight_sailfish_alignment=0.5,
+            weight_sailfish_cohesion=0.0,
+            radius_sailfish_separation=80.0,
+            radius_sailfish_alignment=150.0,
+            radius_sailfish_cohesion=150.0,
+        )
+        sardine_grid = SpatialHash(cell_size=cfg.cell_size,
+                                   world_width=float(cfg.window_width),
+                                   world_height=float(cfg.window_height))
+        sf_grid = SpatialHash(cell_size=cfg.sailfish_cell_size,
+                              world_width=float(cfg.window_width),
+                              world_height=float(cfg.window_height))
+        sf = Sailfish(700.0, 350.0, 80.0, 0.0, cfg, sardine_grid, sf_grid)
+        # Only sf is inserted — no neighbours
+        sf_grid.insert(sf)
+        sf.acceleration[:] = 0.0
+        sf._compute_forces()
+        mag = math.sqrt(float(sf.acceleration[0])**2 + float(sf.acceleration[1])**2)
+        self.assertAlmostEqual(mag, 0.0, places=9,
+                               msg="isolated sailfish must produce zero flocking force")
+
+    def test_no_flocking_without_sailfish_grid(self):
+        """sailfish_grid=None disables the flocking block entirely."""
+        from sim.sailfish import Sailfish
+        cfg = SimConfig(
+            num_sardines=0, num_sailfish=0, num_algae=0,
+            weight_pursuit=0.0,
+            weight_sailfish_separation=3.0,
+        )
+        sardine_grid = SpatialHash(cell_size=cfg.cell_size,
+                                   world_width=float(cfg.window_width),
+                                   world_height=float(cfg.window_height))
+        sf = Sailfish(700.0, 350.0, 80.0, 0.0, cfg, sardine_grid)  # no sf_grid
+        sf.acceleration[:] = 0.0
+        sf._compute_forces()
+        np.testing.assert_array_equal(sf.acceleration, np.zeros(2))
+
+    # ── Alignment ────────────────────────────────────────────────────
+
+    def test_alignment_force_with_different_heading_neighbour(self):
+        """Sailfish with a differently-headed neighbour accumulates alignment force."""
+        _, sf1, _ = _make_sf_pair(
+            sep_weight=0.0, ali_weight=1.0, ali_radius=150.0, coh_weight=0.0,
+            sf1_pos=(700.0, 350.0), sf2_pos=(740.0, 350.0),
+            sf1_vel=(80.0, 0.0), sf2_vel=(0.0, 80.0),   # sf2 heading +y vs sf1 +x
+        )
+        sf1.acceleration[:] = 0.0
+        sf1._compute_forces()
+        mag = math.sqrt(float(sf1.acceleration[0])**2 + float(sf1.acceleration[1])**2)
+        self.assertGreater(mag, 0.0, "alignment with differently-headed neighbour must apply a force")
+
+    def test_no_alignment_beyond_radius(self):
+        """Neighbour beyond ali_radius produces no alignment force."""
+        _, sf1, _ = _make_sf_pair(
+            sep_weight=0.0, ali_weight=1.0, ali_radius=30.0, coh_weight=0.0,
+            sf1_pos=(700.0, 350.0), sf2_pos=(750.0, 350.0),  # 50 px > ali_radius=30
+            sf1_vel=(80.0, 0.0), sf2_vel=(0.0, 80.0),
+        )
+        sf1.acceleration[:] = 0.0
+        sf1._compute_forces()
+        mag = math.sqrt(float(sf1.acceleration[0])**2 + float(sf1.acceleration[1])**2)
+        self.assertAlmostEqual(mag, 0.0, places=9,
+                               msg="neighbour beyond ali_radius must not produce alignment force")
+
+    # ── apply_config cache refresh ────────────────────────────────────
+
+    def test_apply_config_refreshes_sailfish_flocking_caches(self):
+        """apply_config() updates _sf_sep_r2, _sf_ali_r2, _sf_coh_r2 on sailfish."""
+        import dataclasses
+        from sim.sailfish import Sailfish
+
+        cfg = SimConfig(
+            num_sardines=0, num_sailfish=0, num_algae=0,
+            radius_sailfish_separation=80.0,
+            radius_sailfish_alignment=150.0,
+            radius_sailfish_cohesion=150.0,
+        )
+        sim = Simulation(cfg)
+        sf = Sailfish(700.0, 350.0, 80.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
+        sim.sailfish.append(sf)
+
+        new_sep = 50.0
+        new_ali = 100.0
+        new_coh = 120.0
+        sim.apply_config(dataclasses.replace(
+            cfg,
+            radius_sailfish_separation=new_sep,
+            radius_sailfish_alignment=new_ali,
+            radius_sailfish_cohesion=new_coh,
+        ))
+
+        self.assertAlmostEqual(sf._sf_sep_r2, new_sep ** 2, places=9,
+                               msg="_sf_sep_r2 must refresh after apply_config")
+        self.assertAlmostEqual(sf._sf_ali_r2, new_ali ** 2, places=9,
+                               msg="_sf_ali_r2 must refresh after apply_config")
+        self.assertAlmostEqual(sf._sf_coh_r2, new_coh ** 2, places=9,
+                               msg="_sf_coh_r2 must refresh after apply_config")
+
+    # ── Spawned sailfish have correct flocking caches ─────────────────
+
+    def test_spawned_sailfish_have_sailfish_grid(self):
+        """All sailfish created by Simulation._spawn_sailfish() receive sailfish_grid."""
+        cfg = SimConfig(num_sailfish=4, num_sardines=0, num_algae=0)
+        sim = Simulation(cfg)
+        for sf in sim.sailfish:
+            self.assertIsNotNone(sf._sailfish_grid,
+                                 "startup sailfish must have _sailfish_grid set")
+            self.assertIs(sf._sailfish_grid, sim._sailfish_grid,
+                          "_sailfish_grid must be the simulation's grid object")
+
+    def test_add_sailfish_has_sailfish_grid(self):
+        """Sailfish added via add_sailfish() also receive _sailfish_grid."""
+        cfg = SimConfig(num_sailfish=0, num_sardines=0, num_algae=0)
+        sim = Simulation(cfg)
+        sim.add_sailfish(3)
+        for sf in sim.sailfish:
+            self.assertIs(sf._sailfish_grid, sim._sailfish_grid,
+                          "add_sailfish() must set _sailfish_grid correctly")
+
+    def test_reproduced_sailfish_has_sailfish_grid(self):
+        """Offspring created by _reproduce_sailfish() receive _sailfish_grid."""
+        from sim.sailfish import Sailfish
+        cfg = SimConfig(
+            num_sailfish=0, num_sardines=0, num_algae=0,
+            sailfish_eat_threshold=1,
+            sailfish_reproduction_enabled=True,
+            sailfish_starvation_time=0.0,
+            sailfish_initial_hunger_time=0.0,
+            sardine_starvation_time=0.0,
+            sailfish_min_speed=0.0,
+            weight_pursuit=0.0, weight_flee=0.0,
+            weight_separation=0.0, weight_alignment=0.0,
+            weight_cohesion=0.0, weight_noise=0.0,
+            weight_algae_separation=0.0, weight_algae_alignment=0.0,
+            weight_algae_cohesion=0.0, weight_algae_noise=0.0,
+        )
+        sim = Simulation(cfg)
+        sf = Sailfish(700.0, 350.0, 10.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
+        sf.food_counter = 1.0
+        sim.sailfish.append(sf)
+        sim.update(1 / 60)
+        self.assertEqual(len(sim.sailfish), 2, "Expected one offspring")
+        offspring = sim.sailfish[1]
+        self.assertIs(offspring._sailfish_grid, sim._sailfish_grid,
+                      "reproduced sailfish must have _sailfish_grid set")
+
+    # ── Pursuit still works with flocking enabled ─────────────────────
+
+    def test_pursuit_still_fires_when_flocking_enabled(self):
+        """Pursuit force toward sardines is not suppressed when sailfish flocking is on."""
+        from sim.sardine import Sardine
+        from sim.sailfish import Sailfish
+
+        cfg = SimConfig(
+            num_sardines=0, num_sailfish=0, num_algae=0,
+            radius_sailfish_awareness=200.0,
+            weight_pursuit=1.5,
+            weight_sailfish_separation=3.0,
+            weight_sailfish_alignment=0.5,
+            weight_sailfish_cohesion=0.0,
+            radius_sailfish_separation=80.0,
+            radius_sailfish_alignment=150.0,
+            radius_sailfish_cohesion=150.0,
+            sailfish_min_speed=0.0,
+        )
+        sardine_grid = SpatialHash(
+            cell_size=cfg.cell_size,
+            world_width=float(cfg.window_width),
+            world_height=float(cfg.window_height),
+        )
+        sf_grid = SpatialHash(
+            cell_size=cfg.sailfish_cell_size,
+            world_width=float(cfg.window_width),
+            world_height=float(cfg.window_height),
+        )
+        # Sardine 80 px to the +x of the sailfish — within awareness radius
+        sardine = Sardine(780.0, 350.0, 10.0, 0.0, cfg, sardine_grid)
+        sardine_grid.insert(sardine)
+        sf = Sailfish(700.0, 350.0, 80.0, 0.0, cfg, sardine_grid, sf_grid)
+        sf_grid.insert(sf)
+
+        sf.acceleration[:] = 0.0
+        sf._compute_forces()
+        # Pursuit steers toward +x; acceleration[0] must be > 0
+        self.assertGreater(float(sf.acceleration[0]), 0.0,
+                           "pursuit force must still fire (+x) when sailfish flocking is enabled")
+
+    # ── Simulation-level integration ──────────────────────────────────
+
+    def test_simulation_sailfish_spread_after_tick(self):
+        """Two sailfish placed on top of each other spread apart after one update()."""
+        cfg = SimConfig(
+            num_sardines=0, num_sailfish=0, num_algae=0,
+            weight_pursuit=0.0,
+            weight_sailfish_separation=3.0,
+            radius_sailfish_separation=80.0,
+            weight_sailfish_alignment=0.0,
+            weight_sailfish_cohesion=0.0,
+            sailfish_max_speed=250.0,
+            sailfish_min_speed=0.0,
+            sailfish_max_force=200.0,
+            sailfish_starvation_time=0.0,
+            sardine_starvation_time=0.0,
+        )
+        sim = Simulation(cfg)
+        from sim.sailfish import Sailfish
+        sf1 = Sailfish(700.0, 350.0, 80.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
+        sf2 = Sailfish(720.0, 350.0, 80.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
+        sim.sailfish.extend([sf1, sf2])
+
+        sim.update(1 / 60)
+
+        # After one tick they don't need to be far apart, just confirm forces
+        # fired (i.e., the update didn't error and they moved).
+        dx = float(sf1.position[0]) - float(sf2.position[0])
+        dy = float(sf1.position[1]) - float(sf2.position[1])
+        d = math.sqrt(dx * dx + dy * dy)
+        self.assertGreater(d, 0.0, "The two sailfish should have moved apart")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

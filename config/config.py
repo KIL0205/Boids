@@ -112,6 +112,17 @@ class SimConfig:
     # Multiplier on the Reynolds pursuit steer force.
     weight_pursuit: float = 1.5
 
+    # ── Sailfish flocking (sailfish-vs-sailfish interactions) ─────────────
+    # Separation is the primary mechanism — spreads sailfish around prey
+    # instead of stacking.  Alignment adds light heading coordination.
+    # Cohesion is off by default; pursuit already clusters them near prey.
+    weight_sailfish_separation: float = 3.0    # stronger than sardine sep (2.0)
+    weight_sailfish_alignment:  float = 0.5    # mild heading match
+    weight_sailfish_cohesion:   float = 0.0    # off; let pursuit handle grouping
+    radius_sailfish_separation: float = 80.0   # px; ~2 sailfish body-lengths at size=12
+    radius_sailfish_alignment:  float = 150.0  # px
+    radius_sailfish_cohesion:   float = 150.0  # px; == alignment so coh neighbours also align
+
     sailfish_size: float = 12.0     # 2× sardine; body ≈ 36 px
 
     # Sailfish color mode — selects a fixed color for all sailfish.

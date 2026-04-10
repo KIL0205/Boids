@@ -16,6 +16,7 @@ manages world state.
 
 from __future__ import annotations
 
+import collections
 import math
 from typing import TYPE_CHECKING
 
@@ -182,6 +183,16 @@ class Simulation:
         self._s_acc: np.ndarray = np.zeros((0, 2), dtype=np.float64)
         self._s_n:   int        = 0  # number of live sardines in batch arrays
 
+        # ── Population history (for 'd'-key graph overlay) ────────────
+        # Sampled at ~1 Hz of simulated time; deque cap prevents unbounded
+        # growth.  Each entry is (sim_time, n_sardines, n_sailfish, n_algae).
+        self.sim_time: float = 0.0
+        self._pop_history_accum: float = 0.0
+        self.pop_history: collections.deque = collections.deque(maxlen=3600)
+        self.pop_history.append(
+            (0.0, len(self.sardines), len(self.sailfish), len(self.algae))
+        )
+
     # ── Initialisation ────────────────────────────────────────────────
 
     def _spawn_sardines(self) -> None:
@@ -247,10 +258,12 @@ class Simulation:
             y  = float(rng.uniform(0.0, H))
             vx = float(np.cos(angles[i])) * speed
             vy = float(np.sin(angles[i])) * speed
-            # Sailfish receive the sardine grid so they can query sardine
-            # positions in _compute_forces.  They are never inserted into it.
+            # Sailfish receive the sardine grid (query prey) and the sailfish
+            # grid (sailfish-to-sailfish flocking).  They are never inserted
+            # into the sardine grid.
             self.sailfish.append(
-                Sailfish(x, y, vx, vy, self.config, self._grid)
+                Sailfish(x, y, vx, vy, self.config, self._grid,
+                         sailfish_grid=self._sailfish_grid)
             )
 
     # ── Update loop ───────────────────────────────────────────────────
@@ -271,6 +284,15 @@ class Simulation:
         # Guard against frame-drop spikes: Euler integration diverges if dt
         # is too large (e.g. first frame, system sleep, window drag).
         dt = min(dt, 1 / 20)  # cap at 50 ms ≈ 3 dropped frames
+
+        # Accumulate simulated time and sample population history at ~1 Hz.
+        self.sim_time += dt
+        self._pop_history_accum += dt
+        if self._pop_history_accum >= 1.0:
+            self._pop_history_accum -= 1.0
+            self.pop_history.append(
+                (self.sim_time, len(self.sardines), len(self.sailfish), len(self.algae))
+            )
 
         # Clear eaten IDs from the previous frame so stale entries never
         # accumulate and the renderer always sees only this frame's removals.
@@ -560,6 +582,7 @@ class Simulation:
                 offspring = Sailfish(
                     ox, oy, vx, vy,
                     cfg, self._grid,
+                    sailfish_grid=self._sailfish_grid,
                 )
                 self.sailfish.append(offspring)
                 self._sailfish_born.append(offspring)
@@ -1096,6 +1119,10 @@ class Simulation:
             agent.max_force = new_config.sailfish_max_force
             agent.min_speed = new_config.sailfish_min_speed
             agent._boundary_wrap = (new_config.boundary == "wrap")
+            # Refresh sailfish-flocking squared-radius caches.
+            agent._sf_sep_r2 = new_config.radius_sailfish_separation ** 2
+            agent._sf_ali_r2 = new_config.radius_sailfish_alignment  ** 2
+            agent._sf_coh_r2 = new_config.radius_sailfish_cohesion   ** 2
         for agent in self.algae:
             agent._config   = new_config
             agent._sep_r2   = new_config.radius_algae_separation ** 2
@@ -1191,6 +1218,7 @@ class Simulation:
                     np.cos(angle) * speed,
                     np.sin(angle) * speed,
                     self.config, self._grid,
+                    sailfish_grid=self._sailfish_grid,
                 )
             )
         self._sync_population_counts()

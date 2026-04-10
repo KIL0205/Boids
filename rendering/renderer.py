@@ -254,6 +254,233 @@ class Hud:
         self._label.draw()
 
 
+# ── Graph colors (match species visual identity) ──────────────────────────────
+_GRAPH_SARDINE_COLOR:  tuple[int, int, int, int] = (100, 200, 220, 230)   # cyan-blue
+_GRAPH_SAILFISH_COLOR: tuple[int, int, int, int] = (230,  90,  50, 230)   # orange-red
+_GRAPH_ALGAE_COLOR:    tuple[int, int, int, int] = (180, 100,  40, 200)   # amber-brown
+_GRAPH_BG_COLOR:       tuple[int, int, int, int] = ( 10,  15,  25, 210)   # near-black
+
+# Maximum number of line segments rendered per species.  History beyond this
+# is uniformly downsampled so render cost is bounded regardless of session length.
+_GRAPH_MAX_DISPLAY_PTS: int   = 200
+# Minimum wall-clock seconds between geometry rebuilds (~4 Hz).
+_GRAPH_REBUILD_INTERVAL: float = 0.25
+
+
+class PopGraph:
+    """Population-vs-time graph overlay, toggled by the 'd' key.
+
+    Performance design
+    ------------------
+    * All line segments live in a dedicated ``pyglet.graphics.Batch`` so the
+      entire graph submits as **one** GL draw call regardless of point count.
+    * Geometry is rebuilt at most ``_GRAPH_REBUILD_INTERVAL`` seconds (~4 Hz)
+      rather than every frame (~60 Hz).  The background rectangle and all text
+      labels are created once and reused; only their ``.text`` values are
+      updated on each geometry rebuild.
+    * Displayed history is capped at ``_GRAPH_MAX_DISPLAY_PTS`` via uniform
+      downsampling so Python-side allocation stays bounded.
+
+    Typical steady-state cost per frame: one batch draw call + ~9 label draws.
+    Geometry rebuild cost (~4 Hz): O(_GRAPH_MAX_DISPLAY_PTS) shape allocations.
+    """
+
+    _W      = 680   # panel width  (px)
+    _H      = 340   # panel height (px)
+    _PAD    = 54    # left/bottom inner padding for plot area (px)
+    _MARGIN = 16    # gap from window edge (px)
+    _FONTS  = ["Menlo", "Consolas", "Courier New"]
+
+    def __init__(self, window_width: int, window_height: int) -> None:
+        self._win_w = window_width
+        self._win_h = window_height
+        self._line_shapes: list[pyglet.shapes.Line] = []
+        self._graph_batch: pyglet.graphics.Batch = pyglet.graphics.Batch()
+        self._bg: pyglet.shapes.Rectangle | None = None
+        self._last_rebuild: float = 0.0
+        self._last_history_len: int = -1
+        self._rebuild_labels()
+
+    # ── Internal helpers ──────────────────────────────────────────────
+
+    def _panel_origin(self) -> tuple[int, int]:
+        """Bottom-left corner of the panel in window coordinates."""
+        return (self._win_w - self._W - self._MARGIN, self._MARGIN)
+
+    def _plot_rect(self) -> tuple[float, float, float, float]:
+        """Return (plot_x, plot_y, plot_w, plot_h) — inner plot area."""
+        px, py = self._panel_origin()
+        pad = self._PAD
+        return (px + pad, py + pad - 10, self._W - pad - 8, self._H - pad - 30)
+
+    def _rebuild_labels(self) -> None:
+        """Create/reposition all shapes and labels.  Called on init and resize."""
+        # Release old line shapes before dropping the batch reference.
+        for seg in self._line_shapes:
+            seg.delete()
+        self._line_shapes = []
+        self._graph_batch = pyglet.graphics.Batch()
+        self._last_rebuild = 0.0    # force geometry rebuild on next draw
+        self._last_history_len = -1
+
+        px, py = self._panel_origin()
+        W, H   = self._W, self._H
+        plot_x, plot_y, plot_w, plot_h = self._plot_rect()
+        f   = self._FONTS
+        dim = (160, 160, 160, 200)
+
+        # Background rectangle — recreated here so position tracks resize.
+        self._bg = pyglet.shapes.Rectangle(px, py, W, H, color=_GRAPH_BG_COLOR)
+
+        # ── Static labels ─────────────────────────────────────────────
+        self._lbl_title = pyglet.text.Label(
+            "Population History  [D to close]",
+            font_name=f, font_size=11,
+            x=px + 6, y=py + H - 5,
+            anchor_y="top", color=(200, 200, 200, 210),
+        )
+        self._lbl_xaxis = pyglet.text.Label(
+            "Time (s)", font_name=f, font_size=9,
+            x=px + W // 2, y=py + 3,
+            anchor_x="center", anchor_y="bottom", color=dim,
+        )
+        self._lbl_sardine = pyglet.text.Label(
+            "\u25a0 Sardines", font_name=f, font_size=10,
+            x=px + self._PAD + 4, y=py + H - 20,
+            anchor_y="top", color=_GRAPH_SARDINE_COLOR,
+        )
+        self._lbl_sailfish = pyglet.text.Label(
+            "\u25a0 Sailfish", font_name=f, font_size=10,
+            x=px + self._PAD + 110, y=py + H - 20,
+            anchor_y="top", color=_GRAPH_SAILFISH_COLOR,
+        )
+        self._lbl_algae = pyglet.text.Label(
+            "\u25a0 Algae", font_name=f, font_size=10,
+            x=px + self._PAD + 220, y=py + H - 20,
+            anchor_y="top", color=_GRAPH_ALGAE_COLOR,
+        )
+        self._static_labels = [
+            self._lbl_title, self._lbl_xaxis,
+            self._lbl_sardine, self._lbl_sailfish, self._lbl_algae,
+        ]
+
+        # ── Dynamic tick labels (text updated in _rebuild_geometry) ───
+        self._lbl_y_max = pyglet.text.Label(
+            "?", font_name=f, font_size=9,
+            x=plot_x - 3, y=plot_y + plot_h,
+            anchor_x="right", anchor_y="center", color=dim,
+        )
+        self._lbl_y_zero = pyglet.text.Label(
+            "0", font_name=f, font_size=9,
+            x=plot_x - 3, y=plot_y,
+            anchor_x="right", anchor_y="center", color=dim,
+        )
+        self._lbl_t_start = pyglet.text.Label(
+            "0s", font_name=f, font_size=9,
+            x=plot_x, y=plot_y - 3,
+            anchor_x="left", anchor_y="top", color=dim,
+        )
+        self._lbl_t_end = pyglet.text.Label(
+            "?", font_name=f, font_size=9,
+            x=plot_x + plot_w, y=plot_y - 3,
+            anchor_x="right", anchor_y="top", color=dim,
+        )
+        self._data_labels = [
+            self._lbl_y_max, self._lbl_y_zero,
+            self._lbl_t_start, self._lbl_t_end,
+        ]
+
+    def _rebuild_geometry(self, simulation: "Simulation") -> None:
+        """Rebuild line segments from current history into ``_graph_batch``.
+
+        Called at ~4 Hz and on the first draw after construction/resize.
+        Uniformly downsamples to ``_GRAPH_MAX_DISPLAY_PTS`` so cost is bounded.
+        """
+        # Release old shapes before replacing the batch.
+        for seg in self._line_shapes:
+            seg.delete()
+        self._line_shapes = []
+        self._graph_batch = pyglet.graphics.Batch()
+
+        history = simulation.pop_history
+        n = len(history)
+        self._last_history_len = n
+        if n < 2:
+            return
+
+        # Uniform downsample: keep at most _GRAPH_MAX_DISPLAY_PTS points.
+        pts: list = list(history)
+        if n > _GRAPH_MAX_DISPLAY_PTS:
+            stride = n / _GRAPH_MAX_DISPLAY_PTS
+            pts = [pts[int(i * stride)] for i in range(_GRAPH_MAX_DISPLAY_PTS - 1)]
+            pts.append(list(history)[-1])   # always include the latest sample
+
+        t_min = pts[0][0]
+        t_max = pts[-1][0]
+        if t_max <= t_min:
+            t_max = t_min + 1.0
+        max_pop = max((max(p[1], p[2], p[3]) for p in pts), default=1)
+        max_pop = max(max_pop, 1)
+
+        # Update dynamic tick label text.
+        self._lbl_y_max.text   = str(max_pop)
+        self._lbl_t_start.text = f"{t_min:.0f}s"
+        self._lbl_t_end.text   = f"{t_max:.0f}s"
+
+        plot_x, plot_y, plot_w, plot_h = self._plot_rect()
+
+        def to_xy(t: float, pop: int) -> tuple[float, float]:
+            x = plot_x + (t - t_min) / (t_max - t_min) * plot_w
+            y = plot_y + (pop / max_pop) * plot_h
+            return x, y
+
+        # Build all segments into the shared batch (one GL call to draw all).
+        for series_idx, color in (
+            (1, _GRAPH_SARDINE_COLOR),
+            (2, _GRAPH_SAILFISH_COLOR),
+            (3, _GRAPH_ALGAE_COLOR),
+        ):
+            for i in range(1, len(pts)):
+                x1, y1 = to_xy(pts[i - 1][0], pts[i - 1][series_idx])
+                x2, y2 = to_xy(pts[i][0],     pts[i][series_idx])
+                self._line_shapes.append(
+                    pyglet.shapes.Line(
+                        x1, y1, x2, y2,
+                        thickness=1.5, color=color,
+                        batch=self._graph_batch,
+                    )
+                )
+
+    # ── Public API ────────────────────────────────────────────────────
+
+    def on_resize(self, window_width: int, window_height: int) -> None:
+        """Reposition all elements after a window resize."""
+        self._win_w = window_width
+        self._win_h = window_height
+        self._rebuild_labels()
+
+    def draw(self, simulation: "Simulation") -> None:
+        """Draw the graph for this frame.
+
+        Cheap at steady state: one batch draw + ~9 label draws.
+        Geometry is rebuilt at most every ``_GRAPH_REBUILD_INTERVAL`` seconds.
+        """
+        now     = time.monotonic()
+        cur_len = len(simulation.pop_history)
+        if (now - self._last_rebuild >= _GRAPH_REBUILD_INTERVAL
+                or cur_len != self._last_history_len):
+            self._rebuild_geometry(simulation)
+            self._last_rebuild = now
+
+        if self._bg is not None:
+            self._bg.draw()
+        self._graph_batch.draw()
+        for lbl in self._static_labels:
+            lbl.draw()
+        for lbl in self._data_labels:
+            lbl.draw()
+
+
 class Renderer:
     """Batch renderer for all simulation agents.
 
@@ -302,6 +529,7 @@ class Renderer:
 
         self._last_render_ms: float = 0.0
         self._hud: Hud | None = Hud(window.height) if config.show_hud else None
+        self._pop_graph: PopGraph | None = None
 
         # Optional mouse-predator radius indicator (drawn outside the batch).
         # Created lazily on the first active frame; deleted on reset().
@@ -580,6 +808,9 @@ class Renderer:
             self._hud.update(simulation, update_ms, self._last_render_ms)
             self._hud.draw()
 
+        if self._pop_graph is not None:
+            self._pop_graph.draw(simulation)
+
     def toggle_hud(self) -> None:
         """Show the HUD if hidden; hide it if shown."""
         if self._hud is None:
@@ -587,10 +818,19 @@ class Renderer:
         else:
             self._hud = None
 
+    def toggle_pop_graph(self) -> None:
+        """Show the population graph if hidden; hide it if shown."""
+        if self._pop_graph is None:
+            self._pop_graph = PopGraph(self._window.width, self._window.height)
+        else:
+            self._pop_graph = None
+
     def on_resize(self, width: int, height: int) -> None:
         """React to a window resize: reposition the HUD label."""
         if self._hud is not None:
             self._hud.reposition(height)
+        if self._pop_graph is not None:
+            self._pop_graph.on_resize(width, height)
 
     # ── Private helpers ───────────────────────────────────────────────
 

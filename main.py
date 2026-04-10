@@ -107,6 +107,8 @@ def main() -> None:
             window.close()
         elif symbol == pyglet.window.key.H:
             renderer.toggle_hud()
+        elif symbol == pyglet.window.key.D:
+            renderer.toggle_pop_graph()
         elif symbol == pyglet.window.key.F:
             # Toggle fullscreen; pyglet fires on_resize automatically afterwards.
             window.set_fullscreen(not window.fullscreen)
