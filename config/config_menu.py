@@ -227,10 +227,12 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     # Sardine
     _MenuItem("Sardine repro",   "sardine_eat_threshold",    1.0,   5.0,   0.0,   20.0),
     _MenuItem("Sardine starve",  "sardine_starvation_time",  1.0,  10.0,   0.0,  300.0),
+    _MenuItem("Sardine max",     "sardine_max_count",       50.0, 200.0,   0.0, 3000.0),
     # Sailfish
     _MenuItem("Sailfish eat r",  "sailfish_eat_radius",      1.0,   5.0,  10.0,   80.0),
     _MenuItem("Sailfish repro",  "sailfish_eat_threshold",   1.0,   5.0,   0.0,   75.0),
-    _MenuItem("Sailfish starve", "sailfish_starvation_time", 5.0,  30.0,   0.0,  600.0),
+    _MenuItem("Sailfish starve", "sailfish_starvation_time", 1.0,  30.0,   0.0,  600.0),
+    _MenuItem("Sailfish max",    "sailfish_max_count",       1.0,   5.0,   0.0,  200.0),
     _ToggleItem("SF starvation", "sailfish_starvation_enabled"),
     _ToggleItem("SF repro",      "sailfish_reproduction_enabled"),
 

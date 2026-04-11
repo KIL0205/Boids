@@ -8,6 +8,7 @@
 
 ## Log Maintenance
 - Full maintenance and cleanup pass (April 2026): test counts corrected to 268/23 suites; config menu rows updated to current 7-section layout; completed Phase 9 TODO items removed; optimization pass implementation details (Phases 1–4C) migrated to [ARCHIVE.md](memory/ARCHIVE.md).
+- Max-population caps added for sardines and sailfish (April 2026): `sardine_max_count` and `sailfish_max_count` added to `SimConfig`, enforced in `_reproduce_sardines`/`_reproduce_sailfish`, and exposed in the ECOLOGY config menu section. See "Max-population caps" below.
 
 ---
 
@@ -156,9 +157,9 @@ pyglet on_draw → Renderer.draw(simulation)
 ### Runtime config menu
 - TAB toggles the overlay.  Simulation keeps running while open.
 - Modal guard: `handle_key()` returns `True` when open — population controls cannot fire.
-- **57 data rows** across 7 group sections + 1 Save row.  `_VISIBLE_ROWS = 16`; rows scroll automatically as you navigate with ↑/↓.  Scroll indicators (▲/▼) appear in the footer strip when off-screen rows exist.
+- **59 data rows** across 7 group sections + 1 Save row.  `_VISIBLE_ROWS = 16`; rows scroll automatically as you navigate with ↑/↓.  Scroll indicators (▲/▼) appear in the footer strip when off-screen rows exist.
   - Sections: **SARDINES** (movement, flocking, flee, color); **MOUSE PREDATOR**; **SAILFISH — FLOCKING** (kinematics, sf-to-sf flocking, color); **SAILFISH — HUNTING** (COM pursuit, individual targeting, vulnerability scoring, school-pressure/orbit); **SAILFISH — BURST** (burst trigger/duration/cooldown/multipliers); **ALGAE** (kinematics, flocking weights, respawn/ecology); **ECOLOGY** (sardine + sailfish reproduction/starvation).
-- **Int field safety**: `sardine_eat_threshold` and `algae_max_count` are int fields in `SimConfig`.  `_adjust_value()` detects `isinstance(cur_typed, int)` and casts back to `int` before `dataclasses.replace()` to avoid a `TypeError` on the frozen dataclass.
+- **Int field safety**: `sardine_eat_threshold`, `algae_max_count`, `sardine_max_count`, and `sailfish_max_count` are int fields in `SimConfig`.  `_adjust_value()` detects `isinstance(cur_typed, int)` and casts back to `int` before `dataclasses.replace()` to avoid a `TypeError` on the frozen dataclass.
 - `S` key (from any row) or Enter/←/→ on the Save row writes `boids_overrides.json`.
 - Resize-safe: `_build(w, h)` recreates all pyglet objects; panel y clamped to `max(0, py)`.
 
@@ -168,6 +169,22 @@ pyglet on_draw → Renderer.draw(simulation)
 - Type coercion via `typing.get_type_hints(SimConfig)` — unknown fields and type mismatches skipped.
 - Atomic write: write to `.tmp`, then `Path.replace()` rename — crash-safe.
 - `Simulation._sync_population_counts()` keeps `config.num_sardines/num_sailfish` in sync after every `add_*`/`remove_*` call so saved population counts match live counts.
+
+### Max-population caps
+All three species have a configurable population ceiling that prevents unbounded growth:
+
+| Field | Default | Enforcement point |
+|---|---|---|
+| `algae_max_count` | 1200 | `Simulation.update()` — respawn accumulator loop (`_spawn_algae_batch`) |
+| `sardine_max_count` | 600 | `_reproduce_sardines()` — skips spawning offspring when at/above cap |
+| `sailfish_max_count` | 40 | `_reproduce_sailfish()` — skips spawning offspring when at/above cap |
+
+**Pattern** (identical for all three):  
+- Check `if max_pop > 0 and len(population) >= max_pop` before adding a new agent.
+- `max_pop = 0` disables the cap entirely (unlimited growth).
+- The `food_counter` threshold is still decremented even when the cap blocks spawning, so excess eating carries forward naturally.
+- **Manual keyboard spawning** (`↑`/`→` keys → `add_sardines`/`add_sailfish`) is **not** capped — consistent with algae, which also allows manual-addition above `algae_max_count`.
+- UI: `Sardine max` and `Sailfish max` rows added to the ECOLOGY config menu section (alongside existing repro/starve params); stepped at 50/200 (sardines) and 1/5 (sailfish); both are `int` fields and use the existing auto-cast path in `_adjust_value()`.
 
 ### Color system
 - `sardine_color_mode` (str, 7 values) and `sailfish_color_mode` (str, 5 values) in `SimConfig`.
@@ -277,9 +294,11 @@ ALGAE
 ECOLOGY
   Sardine repro      ←→ 1 / Shift 5       [0–20]   (int; algae eaten before sardine splits)
   Sardine starve     ←→ 1 / Shift 10      [0–300]  (s; 0 = disabled)
+  Sardine max        ←→ 50 / Shift 200    [0–3000] (int soft cap; 0 = unlimited)
   Sailfish eat r     ←→ 1 / Shift 5       [10–80]  (sailfish↔sardine contact radius px)
   Sailfish repro     ←→ 1 / Shift 5       [0–75]   (int; sardines eaten before sailfish splits)
   Sailfish starve    ←→ 5 / Shift 30      [0–600]  (s; 0 = disabled)
+  Sailfish max       ←→ 1 / Shift 5       [0–200]  (int soft cap; 0 = unlimited)
   SF starvation      ←→ / Enter           ON/OFF
   SF repro           ←→ / Enter           ON/OFF
   Save to file       ←→ / Enter / S
@@ -360,6 +379,8 @@ All defaults live in `config/config.py` → `SimConfig` frozen dataclass. This i
 | `num_algae` | **800** | Increased from 500; initial algae population |
 | `algae_respawn_rate` | **8.0** | New algae per simulated second; 0.0 = disabled |
 | `algae_max_count` | **1200** | Soft cap; respawn pauses when `len(algae) >= this` |
+| `sardine_max_count` | **600** | Soft cap; reproduction blocked when `len(sardines) >= this`; 0 = unlimited |
+| `sailfish_max_count` | **40** | Soft cap; reproduction blocked when `len(sailfish) >= this`; 0 = unlimited |
 | `algae_max_speed` | 25.0 | px/s (~6× slower than sardines) |
 | `algae_max_force` | 12.0 | px/s²; force/speed ≈ 0.48 — gentle arc |
 | `weight_algae_separation` | 0.3 | Slightly stronger than cohesion |
@@ -410,7 +431,7 @@ All defaults live in `config/config.py` → `SimConfig` frozen dataclass. This i
 - **Sailfish reproduction toggle**: **`sailfish_reproduction_enabled`** bool allows disabling reproduction independently of the numeric threshold.
 - **HUD ecosystem metrics**: 7 lines refreshed at 4 Hz — FPS/timing, live counts per species, algae eaten/spawned, sardine born/starved/eaten + avg hunger, sailfish starved + avg hunger + `[STARV OFF]`/`[REPRO OFF]` indicators when toggles are off, world size, control hints.
 - **Live resize and fullscreen**: world geometry updates in-place; algae positions wrapped; all three grids resized.
-- **Config menu**: 57 data rows across 7 sections (SARDINES, MOUSE PREDATOR, SAILFISH — FLOCKING, SAILFISH — HUNTING, SAILFISH — BURST, ALGAE, ECOLOGY) + Save; scrollable panel (16 visible rows, ▲/▼ indicators); int fields (`sardine_eat_threshold`, `algae_max_count`) preserved through `apply_config`; save/load round-trip lossless.
+- **Config menu**: 59 data rows across 7 sections (SARDINES, MOUSE PREDATOR, SAILFISH — FLOCKING, SAILFISH — HUNTING, SAILFISH — BURST, ALGAE, ECOLOGY) + Save; scrollable panel (16 visible rows, ▲/▼ indicators); int fields (`sardine_eat_threshold`, `algae_max_count`, `sardine_max_count`, `sailfish_max_count`) preserved through `apply_config`; save/load round-trip lossless.
 - **Velocity-based colouring**: 7 sardine modes, 5 sailfish modes; cosine cyclic mapping eliminates heading-wrap flicker.
 - **Config persistence**: `boids_overrides.json` atomic write; population counts synced to live state on save.
 - **Mouse predator**: left-click/drag scatters sardines using existing flee mechanics; `_MouseStimulus` shared object on `Simulation`; read lock-free by all sardines via duck-typed ref; faint red danger-radius circle drawn outside batch; fully configurable via menu; 16 tests in `TestMousePredator`.

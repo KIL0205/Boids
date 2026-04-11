@@ -248,6 +248,18 @@ class SimConfig:
     # starting state.
     algae_max_count: int = 1200
 
+    # Soft cap on the total sardine population.  Reproduction is blocked while
+    # len(sardines) >= sardine_max_count so the school cannot grow unboundedly
+    # through unchecked reproduction.  0 = no cap (unlimited growth).
+    # Manual keyboard spawns (↑ key) are not restricted by this cap.
+    sardine_max_count: int = 600
+
+    # Soft cap on the total sailfish population.  Reproduction is blocked while
+    # len(sailfish) >= sailfish_max_count so the pack cannot grow unboundedly.
+    # 0 = no cap (unlimited growth).
+    # Manual keyboard spawns (→ key) are not restricted by this cap.
+    sailfish_max_count: int = 40
+
     # Number of algae a sardine must consume before it reproduces (splits).
     # food_counter is decremented by this amount on reproduction so any
     # "leftover" eating already in progress carries forward.

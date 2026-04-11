@@ -528,10 +528,17 @@ class Simulation:
 
         # Snapshot current list length so newly appended offspring are not
         # iterated in this same loop (avoid runaway spawning in one frame).
+        max_pop   = cfg.sardine_max_count
         n_current = len(self.sardines)
         for sardine in self.sardines[:n_current]:
             if sardine.food_counter >= threshold:
                 sardine.food_counter -= threshold
+
+                # Soft cap: consume the threshold (food_counter decremented
+                # above) but skip spawning when the population is at or above
+                # the configured ceiling.  Mirrors algae_max_count behaviour.
+                if max_pop > 0 and len(self.sardines) >= max_pop:
+                    continue
 
                 # Perpendicular offset based on current heading.
                 vx = float(sardine.velocity[0])
@@ -576,10 +583,17 @@ class Simulation:
 
         # Snapshot current list length so newly appended offspring are not
         # iterated in this same loop (avoid runaway spawning in one frame).
+        max_pop   = cfg.sailfish_max_count
         n_current = len(self.sailfish)
         for sailfish in self.sailfish[:n_current]:
             if sailfish.food_counter >= threshold:
                 sailfish.food_counter -= threshold
+
+                # Soft cap: consume the threshold but skip spawning when the
+                # population is at or above the configured ceiling.
+                # Mirrors sardine_max_count / algae_max_count behaviour.
+                if max_pop > 0 and len(self.sailfish) >= max_pop:
+                    continue
 
                 # Perpendicular offset based on current heading.
                 vx = float(sailfish.velocity[0])
