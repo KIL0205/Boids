@@ -156,12 +156,14 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     _MenuItem("Flee weight",     "weight_flee",              0.5,   5.0,   0.0,   30.0),
     _MenuItem("Flee radius",     "radius_flee",              5.0,  50.0,  20.0,  300.0),
     # Color
-    _CycleItem("Color mode",     "sardine_color_mode",
+    _CycleItem("Color driver",   "sardine_color_driver", ("velocity", "age")),
+    _CycleItem("Color palette",  "sardine_color_palette",
                ("white", "rainbow", "cool", "warm", "ocean", "sunset", "mono")),
     _MenuItem("Vel heading wt",  "vel_color_heading_weight", 0.1,   0.5,   0.0,    2.0),
     _MenuItem("Vel speed wt",    "vel_color_speed_weight",   0.1,   0.5,   0.0,    2.0),
     _MenuItem("Vel turn wt",     "vel_color_turn_weight",    0.1,   0.5,   0.0,    2.0),
     _MenuItem("Vel smoothing",   "vel_color_smoothing",      0.05,  0.1,   0.0,    0.99),
+    _MenuItem("Age grad secs",   "sardine_age_gradient_seconds", 1.0, 10.0, 1.0, 600.0),
 
     # ── Mouse predator ────────────────────────────────────────────────
     _GroupRow("MOUSE PREDATOR"),

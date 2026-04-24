@@ -375,6 +375,7 @@ class Simulation:
             # 1 — increment hunger timer for every sardine regardless of eating.
             for sardine in self.sardines:
                 sardine.hunger_timer += dt
+                sardine.age += dt  # increment age for all sardines (used in Stage 8.6 for max age death)
 
             # 2 — sardine-algae contact eating.
             if self.algae:
@@ -422,6 +423,7 @@ class Simulation:
         if self.sailfish:
             for sf in self.sailfish:
                 sf.hunger_timer += dt
+                sf.age += dt
                 # Decrement individual-target lock timer (counts down to 0, then lock releases).
                 if sf._target_lock_timer > 0.0:
                     sf._target_lock_timer = max(0.0, sf._target_lock_timer - dt)

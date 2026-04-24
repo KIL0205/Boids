@@ -215,8 +215,12 @@ class Hud:
             else:
                 sf_hunger = "---"
 
-            color_mode = cfg.sardine_color_mode
-            color_str  = f"  [{color_mode.upper()}]" if color_mode != "white" else ""
+            driver  = cfg.sardine_color_driver
+            palette = cfg.sardine_color_palette
+            color_str = (
+                f"  [{driver.upper()}/{palette.upper()}]"
+                if palette != "white" else ""
+            )
             sf_flags = ""
             if not cfg.sailfish_starvation_enabled:   sf_flags += "  [STARV OFF]"
             if not cfg.sailfish_reproduction_enabled: sf_flags += "  [REPRO OFF]"
@@ -242,7 +246,7 @@ class Hud:
             f"  avg hunger {sf_hunger}{sf_flags}{color_str}\n"
             f"World {W} \u00d7 {H} px\n"
             f"\u2191/\u2193 sardines (+/-50)  \u2190/\u2192 sailfish (+/-1)  "
-            f"F fullscreen  H HUD  V color-mode  TAB config"
+            f"F fullscreen  H HUD  V color-palette  TAB config"
         )
 
     def reposition(self, window_height: int) -> None:
@@ -488,7 +492,7 @@ class Renderer:
     ----------
     config:
         Shared simulation config; reads ``sardine_size``, ``background_color``,
-        and ``use_velocity_coloring``.
+        sardine color driver/palette settings, and sailfish color mode.
     window:
         The active pyglet window.  Must be created before this class is
         instantiated so the OpenGL context is current.
@@ -518,10 +522,12 @@ class Renderer:
         # Per-fish velocity-color state (rebuilt in reset()).
         self._vel_states: list[_VelColorState] = []
 
-        # Track previous color modes to detect transitions.
-        # On sardine-mode change: reset EMA state; restore white if going to "white".
+        # Track previous color settings to detect transitions.
+        # On sardine driver/palette change: reset EMA state; restore white if
+        # the active palette transitions to "white".
         # On sailfish-mode change: repaint all sailfish triangles in one O(N) pass.
-        self._prev_sardine_mode: str = config.sardine_color_mode
+        self._prev_sardine_driver: str = config.sardine_color_driver
+        self._prev_sardine_palette: str = config.sardine_color_palette
         self._prev_sailfish_mode: str = config.sailfish_color_mode
 
         r, g, b, a = config.background_color
@@ -602,7 +608,8 @@ class Renderer:
         t0 = time.perf_counter()
 
         cfg           = simulation.config
-        sardine_mode  = cfg.sardine_color_mode
+        sardine_driver = cfg.sardine_color_driver
+        sardine_palette = cfg.sardine_color_palette
         sailfish_mode = cfg.sailfish_color_mode
         # Cache size floats once — avoids repeated float() coercions on the
         # frozen-dataclass fields during every call to _sync_shapes*.
@@ -657,21 +664,23 @@ class Renderer:
                 self._sardine_shapes.append(tri)
                 self._vel_states.append(self._sardine_vel_map[id(s)])
 
-        # ── Detect sardine color-mode transitions ─────────────────────────
-        if sardine_mode != self._prev_sardine_mode:
+        # ── Detect sardine color transition (driver and/or palette) ───────
+        if (sardine_driver != self._prev_sardine_driver
+                or sardine_palette != self._prev_sardine_palette):
             # Reset per-fish EMA state so the first frame after a switch has
             # no stale turn-rate estimate regardless of which mode we enter.
             for vs in self._vel_states:
                 vs.frames = 0
-            if sardine_mode == "white":
+            if sardine_palette == "white":
                 # One-shot restore: _sync_shapes only writes vertex positions,
                 # never colors, so without this pass triangles would keep
                 # whatever palette colors they had from the previous mode.
                 for tri in self._sardine_shapes:
                     tri.color = _SARDINE_COLOR
-            self._prev_sardine_mode = sardine_mode
+            self._prev_sardine_driver = sardine_driver
+            self._prev_sardine_palette = sardine_palette
 
-        if sardine_mode == "white":
+        if sardine_palette == "white":
             _sync_shapes(
                 self._sardine_shapes, simulation.sardines,
                 sardine_size_f,
@@ -687,7 +696,9 @@ class Renderer:
                 cfg.vel_color_speed_weight,
                 cfg.vel_color_turn_weight,
                 cfg.vel_color_smoothing,
-                sardine_mode,
+                sardine_driver,
+                sardine_palette,
+                cfg.sardine_age_gradient_seconds,
             )
 
         # ── Detect sailfish color-mode transitions ────────────────────────
@@ -910,14 +921,21 @@ def _sync_shapes_vel_color(
     w_speed: float,
     w_turn: float,
     smoothing: float,
-    mode: str = "rainbow",
+    driver: str = "velocity",
+    palette: str = "rainbow",
+    age_gradient_seconds: float = 60.0,
 ) -> None:
     """Like ``_sync_shapes`` but also updates each triangle's colour.
 
-    Palette modes
-    -------------
-    *mode* is one of ``"rainbow"``, ``"cool"``, ``"warm"``, ``"ocean"``,
-    ``"sunset"``, or ``"mono"``.
+        Driver/palette pipeline
+        -----------------------
+        *driver* selects the scalar signal:
+            - ``"velocity"`` → heading/speed/turn-based signal (legacy behavior)
+            - ``"age"``      → normalized lifetime signal (``age / gradient_seconds``)
+
+        *palette* maps the scalar to color:
+            - ``"rainbow"``, ``"cool"``, ``"warm"``, ``"ocean"``, ``"sunset"``
+            - ``"mono"``
 
     **Rainbow** — full HSV wheel; motion-derived raw_hue used directly.
 
@@ -940,7 +958,8 @@ def _sync_shapes_vel_color(
     visually distinct near the palette midpoint.
 
     **Mono** — hue is irrelevant; saturation is near zero; value
-    (brightness) is derived from speed so fast fish are bright.
+    (brightness) is derived from speed for the velocity driver and from the
+    normalized lifetime scalar for the age driver.
 
     Color channels (shared by all non-mono modes)
     -----------------------------------------------
@@ -950,19 +969,21 @@ def _sync_shapes_vel_color(
                          + speed_norm * _VEL_SPEED_HUE_RANGE * w_speed) % 1.0``
     * Sat   = ``max(_VEL_SAT_MIN, 1.0 - clamp(smooth_turn / _VEL_TURN_REF, 0,1)
                    * w_turn * (1 - _VEL_SAT_MIN))``
-    * Value = brightness from ``_PALETTE_BANDS`` (0.82–0.95 depending on palette)
+    * Value = brightness from ``_PALETTE_BANDS`` (0.82-0.95 depending on palette)
 
     Emergent school coherence: fish sharing heading + speed share the same
     raw_hue and therefore map to the same part of whatever palette is active.
     """
-    band = _PALETTE_BANDS.get(mode, _PALETTE_BANDS["rainbow"])
+    band = _PALETTE_BANDS.get(palette, _PALETTE_BANDS["rainbow"])
     hue_min, hue_max, vel_val = band
     band_width    = hue_max - hue_min
     full_wheel    = band_width >= 1.0   # skip remap for rainbow
-    is_mono       = (mode == "mono")
+    is_mono       = (palette == "mono")
+    use_age_driver = (driver == "age")
     size2         = size * 2.0
     inv_mspd      = 1.0 / max(max_speed, 1.0)
     sat_range     = 1.0 - _VEL_SAT_MIN   # = 0.85
+    age_denom     = max(age_gradient_seconds, 1e-6)
     # Pre-computed cyclic palette geometry for restricted palettes.
     # Cached outside the fish loop; negligible when full_wheel or is_mono.
     hue_center    = (hue_min + hue_max) * 0.5
@@ -999,23 +1020,31 @@ def _sync_shapes_vel_color(
         speed_norm = min(mag * inv_mspd, 1.0)
         turn_norm  = min(vs.smooth_turn / _VEL_TURN_REF, 1.0)
 
+        if use_age_driver:
+            driver_scalar = min(max(float(getattr(agent, "age", 0.0)) / age_denom, 0.0), 1.0)
+        else:
+            heading_01 = angle / _TWO_PI % 1.0
+            driver_scalar = (heading_01 * w_heading
+                             + speed_norm * _VEL_SPEED_HUE_RANGE * w_speed) % 1.0
+
         if is_mono:
             # Grayscale: brightness encodes speed; near-zero saturation.
-            value = max(0.30, min(0.95, 0.35 + speed_norm * 0.55 * w_speed))
+            mono_signal = driver_scalar if use_age_driver else (speed_norm * w_speed)
+            value = max(0.30, min(0.95, 0.35 + mono_signal * 0.55))
             sat   = 0.0
             hue   = 0.58   # irrelevant but defined; slight blue-grey at low sat
         else:
-            heading_01 = angle / _TWO_PI % 1.0
-            raw_hue = (heading_01 * w_heading
-                       + speed_norm * _VEL_SPEED_HUE_RANGE * w_speed) % 1.0
             if full_wheel:
-                hue = raw_hue
+                hue = driver_scalar
             else:
                 # Cyclic cosine mapping — cos(0) = cos(2π) so raw_hue=0
                 # and raw_hue=1 produce identical colors.  No jump at any
                 # heading or speed wrap boundary.
-                hue = (hue_center + band_half * math.cos(raw_hue * _TWO_PI)) % 1.0
-            sat   = max(_VEL_SAT_MIN, 1.0 - turn_norm * w_turn * sat_range)
+                hue = (hue_center + band_half * math.cos(driver_scalar * _TWO_PI)) % 1.0
+            if use_age_driver:
+                sat = 1.0
+            else:
+                sat = max(_VEL_SAT_MIN, 1.0 - turn_norm * w_turn * sat_range)
             value = vel_val
 
         r, g, b = _hsv_to_rgb(hue, sat, value)

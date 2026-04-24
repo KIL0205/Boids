@@ -68,23 +68,23 @@ class SimConfig:
     sardine_size: float = 6.0          # half-length of body triangle (px); body ≈ 18 px
     background_color: tuple[int, int, int, int] = (0, 20, 50, 255)   # deep-water blue
 
-    # ── Sardine color mode ────────────────────────────────────────────
-    # Selects which color palette is applied to sardines each frame.
-    # Valid modes (cycle with ← / → in the VISUAL config menu section):
-    #
-    #   "white"   — static silvery white (default; no per-frame color work)
-    #   "rainbow" — full HSV color wheel keyed to heading + speed + turn rate
+    # ── Sardine color system (driver + palette) ───────────────────────
+    # Driver selects which scalar signal is visualized by the palette:
+    #   "velocity" — heading/speed/turn-based scalar (legacy behavior)
+    #   "age"      — normalized lifetime scalar (age / gradient window)
+    sardine_color_driver: str = "velocity"
+
+    # Palette maps the selected scalar signal to a visible color:
+    #   "white"   — static silvery white (driver ignored)
+    #   "rainbow" — full HSV wheel
     #   "cool"    — blues / teals / purples (hue band constrained)
     #   "warm"    — reds / oranges / yellows (hue band constrained)
     #   "ocean"   — deep aquatic blue-teal-green (slightly dimmer)
     #   "sunset"  — purples / magentas / pinks with orange wrap
-    #   "mono"    — grayscale; brightness encodes speed
-    #
-    # All dynamic modes (everything except "white") still respect the
-    # vel_color_* weighting fields below.
-    sardine_color_mode: str = "white"
+    #   "mono"    — grayscale mapping
+    sardine_color_palette: str = "white"
 
-    # Per-channel kinematic weights for all dynamic sardine color modes.
+    # Per-channel kinematic weights for velocity-driven sardine coloring.
     # Dimensionless multipliers; 0.0 = that channel is silent.
     #
     # Heading weight (0–2):  scales how much heading cycles through the palette.
@@ -95,6 +95,11 @@ class SimConfig:
     vel_color_speed_weight:   float = 0.5
     vel_color_turn_weight:    float = 1.0
     vel_color_smoothing:      float = 0.85
+
+    # Age-driver normalization window.
+    # Used only when sardine_color_driver == "age".
+    # A sardine at age >= sardine_age_gradient_seconds maps to normalized 1.0.
+    sardine_age_gradient_seconds: float = 60.0
 
     # ── Sailfish (Phase 2) ────────────────────────────────────────────
     num_sailfish: int = 8

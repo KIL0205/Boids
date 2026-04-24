@@ -31,7 +31,7 @@ import pstats
 import io
 import time
 
-from config.config import SimConfig
+from boids.config.config import SimConfig
 from sim.simulation import Simulation
 
 # ── Constants ─────────────────────────────────────────────────────────────────

@@ -113,6 +113,8 @@ class Sardine(Boid):
         # Liveness flag — set to False by Simulation when this sardine is eaten
         # or starved so sailfish can detect target death without querying the grid.
         self.is_alive: bool = True
+        self.age: float = 0.0
+
 
     # ── Flocking rules ────────────────────────────────────────────────
 

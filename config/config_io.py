@@ -56,13 +56,16 @@ _RUNTIME_FIELDS: frozenset[str] = frozenset({"window_width", "window_height"})
 # Handled explicitly in load_overrides() for migration; always skipped
 # from the normal field-loading path.
 _SUPERSEDED_FIELDS: frozenset[str] = frozenset({
-    "use_velocity_coloring",   # → sardine_color_mode ("rainbow" when True)
+    "use_velocity_coloring",   # → sardine_color_driver/palette split
+    "sardine_color_mode",      # → sardine_color_driver + sardine_color_palette
     "sailfish_color",          # → sailfish_color_mode ("default")
 })
 
-# Valid string option sets for the new color-mode fields.
-# Values not in these sets are discarded (code default is used instead).
-_VALID_SARDINE_MODES: frozenset[str] = frozenset({
+# Valid string option sets for sardine color driver/palette fields.
+_VALID_SARDINE_DRIVERS: frozenset[str] = frozenset({
+    "velocity", "age",
+})
+_VALID_SARDINE_PALETTES: frozenset[str] = frozenset({
     "white", "rainbow", "cool", "warm", "ocean", "sunset", "mono",
 })
 _VALID_SAILFISH_MODES: frozenset[str] = frozenset({
@@ -172,9 +175,25 @@ def load_overrides() -> dict[str, Any]:
     #   (a) superseded keys don't trigger "unknown field" skip
     #   (b) if the new key is ALSO present in the file, the explicit value wins
     if raw.get("use_velocity_coloring") is True:
-        # Old boolean toggle → new enum; only set if the new key isn't saved too
-        if "sardine_color_mode" not in raw:
-            result["sardine_color_mode"] = "rainbow"
+        # Old boolean toggle → split driver/palette fields.
+        # Only set defaults when the new keys are not already present.
+        if "sardine_color_driver" not in raw:
+            result["sardine_color_driver"] = "velocity"
+        if "sardine_color_palette" not in raw and "sardine_color_mode" not in raw:
+            result["sardine_color_palette"] = "rainbow"
+
+    # Old combined mode field → split driver + palette.
+    old_mode = raw.get("sardine_color_mode")
+    if isinstance(old_mode, str):
+        if "sardine_color_driver" not in raw:
+            result["sardine_color_driver"] = "age" if old_mode == "age" else "velocity"
+        if "sardine_color_palette" not in raw:
+            if old_mode in _VALID_SARDINE_PALETTES:
+                result["sardine_color_palette"] = old_mode
+            elif old_mode == "age":
+                # Legacy age theme had its own gradient; choose a neutral dynamic
+                # palette for migration while keeping the age driver active.
+                result["sardine_color_palette"] = "rainbow"
     # "sailfish_color" was a tuple field; "sailfish_color_mode" is its string
     # replacement.  If only the old key is present, the default ("default") is
     # used automatically — no explicit migration needed.
@@ -192,9 +211,10 @@ def load_overrides() -> dict[str, Any]:
             continue
 
         # ── String-field validation ───────────────────────────────────
-        # For color-mode enums, reject values outside the known set so a
-        # hand-edited file with a typo doesn't silently produce a broken mode.
-        if key == "sardine_color_mode" and coerced not in _VALID_SARDINE_MODES:
+        # For color-driver/palette enums, reject values outside known sets.
+        if key == "sardine_color_driver" and coerced not in _VALID_SARDINE_DRIVERS:
+            continue
+        if key == "sardine_color_palette" and coerced not in _VALID_SARDINE_PALETTES:
             continue
         if key == "sailfish_color_mode" and coerced not in _VALID_SAILFISH_MODES:
             continue

@@ -114,6 +114,7 @@ class Sailfish(Boid):
         # guarantees no spawn path can produce an immediately-starving fish
         # regardless of what sailfish_starvation_time is saved in the config.
         self.hunger_timer: float = 0.0
+        self.age: float = 0.0 # total time alive (used in Stage 8.6 for max age death)
 
     # ── Burst speed override ───────────────────────────────────────────
 
