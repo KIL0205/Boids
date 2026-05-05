@@ -204,6 +204,37 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     # School-pressure / orbit bias (activates when no target, school dense)
     _MenuItem("Pressure str",    "sailfish_school_pressure_strength",        0.1, 0.5, 0.0, 5.0),
     _MenuItem("Pressure dens",   "sailfish_school_pressure_density_threshold", 1.0, 5.0, 1.0, 100.0),
+    # State machine timing
+    _MenuItem("Predict time",    "sailfish_prediction_time",       0.05, 0.1,  0.0,   2.0),
+    _MenuItem("No-sar timeout",  "sailfish_no_sardines_timeout",   0.5,  2.0,  1.0,  30.0),
+    # Baitball detection / cooperative herding
+    _ToggleItem("Baitball detect", "sailfish_baitball_enabled"),
+    _MenuItem("Baitball radius", "sailfish_baitball_detection_radius", 5.0, 20.0, 30.0, 400.0),
+    _MenuItem("Baitball min #",  "sailfish_baitball_min_sardines", 1.0, 5.0, 4.0, 300.0),
+    _MenuItem("Baitball dens",   "sailfish_baitball_density_threshold", 0.02, 0.1, 0.05, 5.0),
+    _MenuItem("Baitball memory", "sailfish_baitball_memory_seconds", 0.1, 0.5, 0.0, 10.0),
+    _ToggleItem("Lock suppress", "sailfish_target_lock_suppressed_near_baitball"),
+    _MenuItem("BB patience",   "sailfish_baitball_patience_seconds", 0.1, 0.5, 0.0, 12.0),
+    _MenuItem("BB min orbit",  "sailfish_baitball_min_orbit_seconds", 0.1, 0.5, 0.0, 12.0),
+    _MenuItem("BB pat jitter", "sailfish_baitball_patience_jitter_seconds", 0.05, 0.2, 0.0, 5.0),
+    _MenuItem("BB group cd",   "sailfish_baitball_strike_group_cooldown_seconds", 0.1, 0.5, 0.0, 20.0),
+    _ToggleItem("Herding",       "sailfish_herding_enabled"),
+    _MenuItem("Orbit radius x",  "sailfish_baitball_orbit_radius_multiplier", 0.05, 0.2, 0.8, 3.0),
+    _MenuItem("Orbit tangent",   "sailfish_baitball_orbit_tangent_strength", 0.1, 0.5, 0.0, 8.0),
+    _MenuItem("Orbit inward",    "sailfish_baitball_inward_pressure_strength", 0.05, 0.2, 0.0, 4.0),
+    _MenuItem("Orbit jitter",    "sailfish_baitball_slot_jitter", 0.02, 0.1, 0.0, 1.0),
+    _MenuItem("Orbit rot spd",   "sailfish_baitball_orbit_rotation_speed", 0.05, 0.2, 0.0, 3.0),
+    _MenuItem("Herd min sf",     "sailfish_herding_min_sailfish", 1.0, 2.0, 1.0, 30.0),
+    # Baitball strike
+    _ToggleItem("BB strike",     "sailfish_baitball_strike_enabled"),
+    _MenuItem("BB dens strike",  "sailfish_baitball_strike_density_threshold", 0.02, 0.1, 0.05, 5.0),
+    _MenuItem("BB edge p",       "sailfish_baitball_edge_target_chance", 0.02, 0.1, 0.0, 1.0),
+    _MenuItem("BB center p",     "sailfish_baitball_center_strike_chance", 0.02, 0.1, 0.0, 1.0),
+    _MenuItem("BB edge band",    "sailfish_baitball_edge_band_width", 1.0, 5.0, 2.0, 100.0),
+    _MenuItem("BB spd mult",     "sailfish_baitball_strike_speed_multiplier", 0.05, 0.2, 1.0, 3.0),
+    _MenuItem("BB strike dur",   "sailfish_baitball_strike_duration_seconds", 0.05, 0.2, 0.1, 5.0),
+    _MenuItem("BB strike cd",    "sailfish_baitball_strike_cooldown_seconds", 0.2, 1.0, 0.0, 20.0),
+    _MenuItem("BB exit dist",    "sailfish_baitball_strike_exit_distance", 2.0, 10.0, 5.0, 300.0),
 
     # ── Sailfish: burst attack ─────────────────────────────────────────
     _GroupRow("SAILFISH — BURST"),
@@ -212,6 +243,7 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     _MenuItem("Burst cooldown",  "sailfish_burst_cooldown",        0.5,  1.0,  0.0,  15.0),
     _MenuItem("Burst spd mult",  "sailfish_burst_speed_mult",      0.05, 0.1,  1.0,   3.0),
     _MenuItem("Burst frc mult",  "sailfish_burst_force_mult",      0.1,  0.5,  1.0,   4.0),
+    _MenuItem("Recovery dur",    "sailfish_recovery_duration",     0.1,  0.5,  0.0,  10.0),
 
     # ── Algae ──────────────────────────────────────────────────────────
     _GroupRow("ALGAE"),

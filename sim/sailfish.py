@@ -1,49 +1,88 @@
 """
 sim/sailfish.py
 ===============
-``Sailfish`` — a pursuit predator that steers toward the centre of mass
-of nearby sardines, while also maintaining spacing with other sailfish.
+``Sailfish`` — a pursuit predator driven by a state machine built
+with the ``transitions`` library.
 
-Behavioural forces
-------------------
-* **Pursuit** — compute the local sardine centre of mass (COM) from all
-  sardines within ``radius_sailfish_awareness`` and steer toward it.
-* **Sailfish separation** — repel from nearby sailfish so the pack spreads
-  around prey rather than stacking (``weight_sailfish_separation``).
-* **Sailfish alignment** — mild heading match with nearby sailfish
-  (``weight_sailfish_alignment``).
-* **Sailfish cohesion** — loose pull toward sailfish COM
-  (``weight_sailfish_cohesion``; off by default).
-* **Idle drift** — when no sardines are visible, coast at
-  ``sailfish_min_speed``; sailfish flocking still fires if sailfish_grid
-  is provided.
+State machine
+-------------
+PATROL          No sardines visible.  Sailfish flocks with other sailfish
+                and drifts.  Transitions to TRACK_SCHOOL when sardines enter
+                ``radius_sailfish_awareness``.
 
-All sardine queries use the sardine ``SpatialHash`` injected at
-construction.  Sailfish-to-sailfish queries use the separate
-``_sailfish_grid`` hash (also rebuild every frame before update is called).
+TRACK_SCHOOL    Sardines are visible.  Sailfish steers toward the sardine
+                school centre-of-mass (COM) and applies the school-pressure
+                orbit bias.  Transitions to TARGET_LOCK when a sardine
+                enters ``sailfish_target_acquire_radius``.  Returns to
+                PATROL after ``sailfish_no_sardines_timeout`` seconds
+                without any visible sardine.
 
-Weights and radii are read from ``SimConfig`` — no magic numbers.
+ORBIT_BAITBALL  Cooperative pressure state around a detected dense school.
+                Sailfish maintain distributed slots around the baitball,
+                apply tangential orbit motion, and only attempt deliberate
+                strikes after patience/cooldown gates.
+
+TARGET_LOCK     One sardine has been chosen and locked.  Sailfish steers
+                toward its predicted future position (predictive
+                interception).  Lock is released when the target dies,
+                escapes beyond ``sailfish_target_drop_radius``, or the
+                lock timer expires.  Transitions to BURST_ATTACK when the
+                target is close enough and burst cooldown is ready.
+
+BURST_ATTACK    High-speed sprint toward the locked target using the same
+                predictive interception as TARGET_LOCK, but at a
+                multiplied max_speed / max_force (managed in update()).
+                Transitions to RECOVER when the burst timer expires
+                (managed by Simulation ecology pass).  Transitions to
+                TRACK_SCHOOL if the target is lost mid-burst.
+
+BAITBALL_STRIKE Fast pass through a detected dense sardine baitball.
+                Sailfish chooses a strike line that crosses the cluster
+                instead of chasing one sardine.  Ends on timer/exit and
+                transitions to RECOVER.
+
+RECOVER         Short rest after a burst/strike during which high-speed
+                attack modes are unavailable. Sailfish pursues the school
+                COM if sardines are visible; otherwise drifts. Timer managed
+                by Simulation; when it expires the machine evaluates the
+                next state (TARGET_LOCK if previous target still valid,
+                else TRACK_SCHOOL).
+
+Behavioural forces (preserved and extended)
+-------------------------------------------
+* Predictive interception toward locked individual sardine.
+* School COM steer when no individual target is held.
+* School-pressure tangential orbit when school density is high.
+* Cooperative herding slots around dense baitballs.
+* Sailfish-to-sailfish separation / alignment / cohesion.
+
+All tunables read from SimConfig -- no magic numbers.
 """
 
 from __future__ import annotations
 
+import logging
 import math
+import random
 from typing import TYPE_CHECKING
 
-import numpy as np
+from transitions import Machine
 
 from sim.boid import Boid
 from config.config import SimConfig
-from utils.vec2 import Vec2, wrap_delta
 
 if TYPE_CHECKING:
+    from sim.simulation import _BaitballInfo
     from sim.spatial_hash import SpatialHash
 
-_EPS2: float = 1e-18  # guards against division by zero in separation
+# Suppress transitions DEBUG noise; keep WARNING and above.
+logging.getLogger("transitions").setLevel(logging.WARNING)
+
+_EPS2: float = 1e-18  # division-by-zero guard in separation force
 
 
 class Sailfish(Boid):
-    """Pursuit-predator sailfish boid.
+    """Pursuit-predator sailfish boid with a transitions state machine.
 
     Parameters
     ----------
@@ -52,16 +91,105 @@ class Sailfish(Boid):
     vx, vy:
         Initial velocity (pixels/second).
     config:
-        Shared simulation config — kinematics, pursuit/flocking weights, radii.
+        Shared simulation config.
     sardine_grid:
         The simulation's sardine-only spatial hash.  Rebuilt every frame by
         ``Simulation`` so queries always reflect current sardine positions.
     sailfish_grid:
-        The simulation's sailfish-only spatial hash.  Rebuilt every frame
-        before ``agent.update()`` is called.  Pass ``None`` to disable
-        sailfish-to-sailfish flocking (used by unit tests that construct
-        sailfish directly without a simulation).
+        The simulation's sailfish-only spatial hash.  Pass ``None`` to
+        disable sailfish-to-sailfish flocking (used by unit tests).
     """
+
+    # ------------------------------------------------------------------ #
+    # State machine definition                                             #
+    # ------------------------------------------------------------------ #
+
+    STATES = [
+        "patrol",
+        "track_school",
+        "orbit_baitball",
+        "target_lock",
+        "burst_attack",
+        "baitball_strike",
+        "recover",
+    ]
+
+    _NEXT_ID: int = 0
+
+    _TRANSITIONS = [
+        # Any non-patrol state can move to TRACK_SCHOOL.
+        {
+            "trigger": "sm_to_track_school",
+            "source":  [
+                "patrol",
+                "target_lock",
+                "burst_attack",
+                "baitball_strike",
+                "recover",
+                "orbit_baitball",
+            ],
+            "dest":    "track_school",
+        },
+        # TRACK_SCHOOL / TARGET_LOCK / RECOVER can shift to cooperative orbit.
+        {
+            "trigger": "sm_to_orbit_baitball",
+            "source":  ["track_school", "target_lock", "recover"],
+            "dest":    "orbit_baitball",
+        },
+        # ORBIT_BAITBALL can fall back when no useful baitball exists.
+        {
+            "trigger": "sm_orbit_to_track_school",
+            "source":  "orbit_baitball",
+            "dest":    "track_school",
+        },
+        # ORBIT_BAITBALL can launch an edge-target strike mode.
+        {
+            "trigger": "sm_orbit_to_target_lock",
+            "source":  "orbit_baitball",
+            "dest":    "target_lock",
+        },
+        # TRACK_SCHOOL / RECOVER can fall back to PATROL when no sardines
+        # are seen for too long.
+        {
+            "trigger": "sm_to_patrol",
+            "source":  ["track_school", "recover"],
+            "dest":    "patrol",
+        },
+        # TRACK_SCHOOL / RECOVER can acquire an individual target.
+        {
+            "trigger": "sm_to_target_lock",
+            "source":  ["track_school", "recover"],
+            "dest":    "target_lock",
+        },
+        # ORBIT_BAITBALL can branch into a baitball strike.
+        {
+            "trigger": "sm_to_baitball_strike",
+            "source":  ["orbit_baitball"],
+            "dest":    "baitball_strike",
+        },
+        # Baitball strike can be canceled if the cluster disappears.
+        {
+            "trigger": "sm_baitball_to_track_school",
+            "source":  "baitball_strike",
+            "dest":    "track_school",
+        },
+        # Only TARGET_LOCK can trigger a burst.
+        {
+            "trigger": "sm_to_burst_attack",
+            "source":  "target_lock",
+            "dest":    "burst_attack",
+        },
+        # BURST_ATTACK and BAITBALL_STRIKE both exit via RECOVER.
+        {
+            "trigger": "sm_to_recover",
+            "source":  ["burst_attack", "baitball_strike"],
+            "dest":    "recover",
+        },
+    ]
+
+    # ------------------------------------------------------------------ #
+    # Constructor                                                          #
+    # ------------------------------------------------------------------ #
 
     def __init__(
         self,
@@ -83,7 +211,11 @@ class Sailfish(Boid):
         self._sardine_grid: "SpatialHash" = sardine_grid
         self._sailfish_grid: "SpatialHash | None" = sailfish_grid
 
-        # Cache per-instance derived values for the _compute_forces hot path.
+        # Stable per-instance id used for deterministic cooperative slotting.
+        self._sid: int = Sailfish._NEXT_ID
+        Sailfish._NEXT_ID += 1
+
+        # World dimension caches.
         self._W:  float = float(config.window_width)
         self._H:  float = float(config.window_height)
         self._hw: float = self._W * 0.5
@@ -91,92 +223,134 @@ class Sailfish(Boid):
 
         # Sailfish-flocking squared-radius caches (refreshed by apply_config).
         self._sf_sep_r2: float = config.radius_sailfish_separation ** 2
-        self._sf_ali_r2: float = config.radius_sailfish_alignment ** 2
-        self._sf_coh_r2: float = config.radius_sailfish_cohesion ** 2
+        self._sf_ali_r2: float = config.radius_sailfish_alignment  ** 2
+        self._sf_coh_r2: float = config.radius_sailfish_cohesion   ** 2
 
-        # Individual prey targeting state.
-        # _target_sardine: the locked individual sardine (or None).
-        # _target_lock_timer: seconds remaining on the current lock.  Decremented
-        #   by Simulation each frame alongside hunger_timer.
+        # ── State machine ─────────────────────────────────────────────
+        # Machine attaches .state (str) and sm_to_*() trigger methods to self.
+        # ignore_invalid_triggers=True: returns False silently for disallowed
+        # transitions instead of raising InvalidTransition.
+        Machine(
+            model=self,
+            states=Sailfish.STATES,
+            transitions=Sailfish._TRANSITIONS,
+            initial="patrol",
+            auto_transitions=False,
+            ignore_invalid_triggers=True,
+        )
+
+        # ── Individual prey targeting ─────────────────────────────────
+        # _target_sardine:    the locked sardine (or None).
+        # _target_lock_timer: seconds remaining; decremented by Simulation.
         self._target_sardine: "object | None" = None
         self._target_lock_timer: float = 0.0
 
-        # Burst attack state (Phase 2).
-        # _burst_timer:          seconds remaining in current burst (0 = not bursting).
-        # _burst_cooldown_timer: seconds until next burst allowed (0 = ready).
+        # ── Burst attack timers ───────────────────────────────────────
+        # _burst_timer:          seconds remaining in current burst.
+        # _burst_cooldown_timer: seconds until next burst is allowed.
         self._burst_timer:          float = 0.0
         self._burst_cooldown_timer: float = 0.0
 
-        # Ecology: feeding state (Phase 8.6 / 8.7)
-        self.food_counter: float = 0.0   # sardines eaten; carries toward future use
-        # Every new sailfish — startup, manually added, or reproduced — starts
-        # with hunger_timer = 0.  This is equivalent to "just eaten" and
-        # guarantees no spawn path can produce an immediately-starving fish
-        # regardless of what sailfish_starvation_time is saved in the config.
-        self.hunger_timer: float = 0.0
-        self.age: float = 0.0 # total time alive (used in Stage 8.6 for max age death)
+        # ── Baitball strike timers/context ────────────────────────────
+        self._baitball_strike_timer: float = 0.0
+        self._baitball_strike_cooldown_timer: float = 0.0
+        self._baitball_memory_timer: float = 0.0
+        self._baitball: "_BaitballInfo | None" = None
+        self._baitball_strike_exit_x: float = 0.0
+        self._baitball_strike_exit_y: float = 0.0
 
-    # ── Burst speed override ───────────────────────────────────────────
+        # Runtime context injected by Simulation each frame.
+        self._baitballs_frame: list["_BaitballInfo"] = []
+        self._sailfish_count: int = 0
+        self._group_strike_cooldown_timer: float = 0.0
+        self._is_herding: bool = False
+        self._orbiting_baitball: bool = False
+
+        # Cooperative baitball pacing state.
+        self._orbit_timer: float = 0.0
+        self._orbit_patience_goal: float = 0.0
+        self._pending_group_strike_trigger: bool = False
+        self._pending_group_strike_kind: str = ""
+
+        # ── State machine timing ──────────────────────────────────────
+        # _no_sardines_timer: seconds in TRACK_SCHOOL/RECOVER without visible
+        #   sardines; triggers PATROL when >= sailfish_no_sardines_timeout.
+        # _recovery_timer:    seconds remaining in RECOVER state; decremented
+        #   by Simulation; reaching 0 triggers next-state selection.
+        # _dt:                dt cached in update() for use in _compute_forces.
+        self._no_sardines_timer: float = 0.0
+        self._recovery_timer:    float = 0.0
+        self._dt:                float = 1.0 / 60.0
+
+        # ── Ecology ───────────────────────────────────────────────────
+        # hunger_timer starts at 0.0 ("just eaten") so no spawn path can
+        # produce an immediately-starving fish regardless of config value.
+        self.food_counter: float = 0.0
+        self.hunger_timer: float = 0.0
+        self.age:          float = 0.0
+
+    # ------------------------------------------------------------------ #
+    # External context                                                      #
+    # ------------------------------------------------------------------ #
+
+    def set_baitball_context(
+        self,
+        baitballs: list["_BaitballInfo"],
+        sailfish_count: int,
+        group_strike_cooldown_timer: float,
+    ) -> None:
+        """Inject this frame's baitball snapshots from Simulation."""
+        self._baitballs_frame = baitballs
+        self._sailfish_count = sailfish_count
+        self._group_strike_cooldown_timer = group_strike_cooldown_timer
+
+    # ------------------------------------------------------------------ #
+    # Speed/force override                                                 #
+    # ------------------------------------------------------------------ #
 
     def update(self, dt: float) -> None:
-        """Apply burst speed/force caps while bursting, then delegate to Boid.update."""
+        """Apply state-specific speed caps and delegate to Boid integration."""
+        self._dt = dt
         cfg = self._config
-        if self._burst_timer > 0.0:
+        if self._burst_timer > 0.0 and self.state == "burst_attack":
             self.max_speed = cfg.sailfish_max_speed * cfg.sailfish_burst_speed_mult
             self.max_force = cfg.sailfish_max_force * cfg.sailfish_burst_force_mult
+        elif self._baitball_strike_timer > 0.0 and self.state == "baitball_strike":
+            self.max_speed = (
+                cfg.sailfish_max_speed * cfg.sailfish_baitball_strike_speed_multiplier
+            )
+            self.max_force = cfg.sailfish_max_force
         else:
-            # Restore base values so they reflect any live config changes.
+            # Restore base values so live config changes propagate.
             self.max_speed = cfg.sailfish_max_speed
             self.max_force = cfg.sailfish_max_force
         super().update(dt)
 
-    # ── Force computation ──────────────────────────────────────────────
+    # ------------------------------------------------------------------ #
+    # Force computation                                                    #
+    # ------------------------------------------------------------------ #
 
     def _compute_forces(self) -> None:
-        """Apply pursuit and sailfish-to-sailfish flocking forces.
-
-        Hunting algorithm (two-stage)
-        ------------------------------
-        **Long range** — when no individual target is locked, query the sardine
-        grid and steer toward the sardine school centre of mass (COM).
-
-        **Close range** — when a sardine enters
-        ``sailfish_target_acquire_radius``, lock onto the nearest one and
-        switch to predictive interception: steer toward
-
-            predicted_pos = target.pos + target.vel * t
-
-        where ``t = min(dist / max_speed, 0.5)`` is a capped look-ahead.
-        This steers slightly *ahead* of the prey rather than directly at its
-        current position, giving smooth, realistic interception curves.
-
-        The lock is released when:
-          * The target sardine is no longer alive (eaten or starved).
-          * The target drifts beyond ``sailfish_target_drop_radius``.
-          * ``_target_lock_timer`` reaches 0 (decremented by simulation.py).
-
-        Sailfish flocking
-        -----------------
-        Runs after pursuit; unchanged from the previous implementation.
-        """
+        """State-machine-driven pursuit + cooperative herding + flocking forces."""
         cfg = self._config
         W   = self._W
         H   = self._H
         hw  = self._hw
         hh  = self._hh
-        _pos = self.position
-        px   = float(_pos[0])
-        py   = float(_pos[1])
+        px  = float(self.position[0])
+        py  = float(self.position[1])
+        dt  = self._dt
 
-        # ── Individual target lock validation ─────────────────────────
+        self._is_herding = False
+        baitball = self._select_active_baitball(dt)
+
+        # ── 1. Validate individual target ─────────────────────────────
         tgt = self._target_sardine
         if tgt is not None:
-            # Drop if sardine was eaten/starved or lock timer expired.
             if not tgt.is_alive or self._target_lock_timer <= 0.0:
                 tgt = None
                 self._target_sardine = None
             else:
-                # Drop if target has drifted beyond the drop radius (toroidal).
                 dx = tgt._gx - px
                 dy = tgt._gy - py
                 if dx >  hw: dx -= W
@@ -188,172 +362,286 @@ class Sailfish(Boid):
                     tgt = None
                     self._target_sardine = None
 
-        # ── Pursuit: individual target or school COM ───────────────────
-        if tgt is not None:
-            # ── Predictive interception toward locked individual sardine ──
-            dx = tgt._gx - px
-            dy = tgt._gy - py
-            if dx >  hw: dx -= W
-            elif dx < -hw: dx += W
-            if dy >  hh: dy -= H
-            elif dy < -hh: dy += H
-            dist = math.sqrt(dx * dx + dy * dy)
-            # Burst trigger: target is close, burst not active, and not cooling down.
-            if (dist < cfg.sailfish_burst_trigger_radius
-                    and self._burst_timer <= 0.0
-                    and self._burst_cooldown_timer <= 0.0):
-                self._burst_timer = cfg.sailfish_burst_duration
-            if dist > 1.0:
-                t   = min(dist / self.max_speed, 0.5)   # cap look-ahead at 0.5 s
-                pdx = dx + tgt._gvx * t
-                pdy = dy + tgt._gvy * t
-            else:
-                pdx, pdy = dx, dy
-            self._steer_apply_xy(pdx, pdy, cfg.weight_target_pursuit)
+        # ── 2. Query sardines ──────────────────────────────────────────
+        sardines = self._sardine_grid.query(self, cfg.radius_sailfish_awareness)
+        has_sardines = bool(sardines)
 
-        else:
-            # ── No locked target: query sardines for acquisition or COM ──
-            sardines = self._sardine_grid.query(self, cfg.radius_sailfish_awareness)
-            if sardines:
-                # Single pass: accumulate COM offsets and collect acquisition
-                # candidates into a small list for Phase 3 vulnerability scoring.
-                acq_r2     = cfg.sailfish_target_acquire_radius ** 2
-                cx = cy    = 0.0
-                candidates = []      # [(dx, dy, d2, sardine)] within acq_r
+        state = self.state
+
+        if state == "patrol":
+            if has_sardines:
+                self._no_sardines_timer = 0.0
+                self.sm_to_track_school()
+                state = self.state
+
+        if state == "track_school":
+            if not has_sardines:
+                self._no_sardines_timer += dt
+            else:
+                self._no_sardines_timer = 0.0
+                n = len(sardines)
+                acq_r2 = cfg.sailfish_target_acquire_radius ** 2
+                cx = cy = 0.0
+                candidates: list = []
                 for s in sardines:
                     dx = s._gx - px
                     dy = s._gy - py
-                    if dx >  hw: dx -= W
-                    elif dx < -hw: dx += W
-                    if dy >  hh: dy -= H
-                    elif dy < -hh: dy += H
+                    if dx > hw:
+                        dx -= W
+                    elif dx < -hw:
+                        dx += W
+                    if dy > hh:
+                        dy -= H
+                    elif dy < -hh:
+                        dy += H
                     cx += dx
                     cy += dy
                     d2 = dx * dx + dy * dy
                     if d2 < acq_r2:
                         candidates.append((dx, dy, d2, s))
 
-                if candidates:
-                    # ── Vulnerable-target scoring (Phase 3) ───────────────
-                    # Desirability = weighted sum of three normalised factors:
-                    #   proximity:  closer sardines are easier to intercept.
-                    #   isolation:  sardines far from the local sardine COM
-                    #               are on the periphery and more exposed.
-                    #   slowness:   slower sardines are harder to escape.
-                    # Higher score = more attractive target.
-                    n          = len(sardines)
-                    com_x      = cx / n
-                    com_y      = cy / n
-                    w_dist     = cfg.sailfish_target_dist_weight
-                    w_iso      = cfg.sailfish_target_isolation_weight
-                    w_spd      = cfg.sailfish_target_speed_weight
-                    inv_acq_r2 = 1.0 / acq_r2
-                    inv_awa_r2 = 1.0 / (cfg.radius_sailfish_awareness
-                                        * cfg.radius_sailfish_awareness)
-                    max_spd2   = cfg.sardine_max_speed * cfg.sardine_max_speed
-                    best_score = -1e18
-                    best_s     = None
-                    alt_score  = -1e18
-                    alt_s      = None
-                    for dx, dy, d2, s in candidates:
-                        # Squared distance of sardine from local school COM.
-                        iso_d2 = (dx - com_x) ** 2 + (dy - com_y) ** 2
-                        # Sardine speed squared (from spatial-hash velocity cache).
-                        s_spd2 = s._gvx * s._gvx + s._gvy * s._gvy
-                        score  = (
-                            w_dist * (1.0 - d2   * inv_acq_r2)
-                            + w_iso  * iso_d2 * inv_awa_r2
-                            + w_spd  * (1.0 - min(s_spd2 / max_spd2, 1.0))
-                        )
-                        if score > best_score:
-                            alt_score, alt_s = best_score, best_s
-                            best_score, best_s = score, s
-                        elif score > alt_score:
-                            alt_score, alt_s = score, s
+                com_x = cx / n
+                com_y = cy / n
 
-                    # Shared-target reduction (Phase 2): if a nearby sailfish
-                    # already holds the best candidate and an alternative exists,
-                    # prefer the alternative.
-                    if self._sailfish_grid is not None and alt_s is not None:
-                        sf_nb = self._sailfish_grid.query(
-                            self, cfg.sailfish_target_acquire_radius
-                        )
-                        if any(other._target_sardine is best_s for other in sf_nb):
-                            best_s = alt_s
+                if self._should_enter_orbit_baitball(baitball):
+                    self.sm_to_orbit_baitball()
+                    self._arm_orbit_patience()
+                    state = self.state
 
-                    # Lock onto chosen sardine; apply predictive pursuit.
-                    self._target_sardine    = best_s
-                    self._target_lock_timer = cfg.sailfish_target_lock_time
-                    dx = best_s._gx - px
-                    dy = best_s._gy - py
-                    if dx >  hw: dx -= W
-                    elif dx < -hw: dx += W
-                    if dy >  hh: dy -= H
-                    elif dy < -hh: dy += H
-                    dist = math.sqrt(dx * dx + dy * dy)
-                    if dist > 1.0:
-                        t   = min(dist / self.max_speed, 0.5)
-                        pdx = dx + best_s._gvx * t
-                        pdy = dy + best_s._gvy * t
+                if state == "track_school":
+                    lock_allowed = self._should_take_individual_target(baitball)
+                    if candidates and lock_allowed:
+                        best_s = self._select_target(
+                            candidates, sardines, cx, cy, n, acq_r2, cfg
+                        )
+                        self._target_sardine = best_s
+                        self._target_lock_timer = cfg.sailfish_target_lock_time
+                        tgt = best_s
+                        self.sm_to_target_lock()
+                        state = self.state
                     else:
-                        pdx, pdy = dx, dy
-                    self._steer_apply_xy(pdx, pdy, cfg.weight_target_pursuit)
+                        self._steer_apply_xy(com_x, com_y, cfg.weight_pursuit)
+                        if n >= cfg.sailfish_school_pressure_density_threshold:
+                            self._apply_school_pressure(com_x, com_y)
+                    # Herding pressure supplements pursuit for all sailfish when
+                    # a baitball is active, not only those skipping target-lock.
+                    self._apply_herding_pressure(baitball, px, py)
 
-                else:
-                    # No sardine close enough to lock — steer toward school COM.
-                    # Phase 3: add an orbit/pressure bias when the school is
-                    # dense so sailfish circle the mass rather than always
-                    # diving straight into the tightest cluster.
-                    n     = len(sardines)
-                    com_x = cx / n
-                    com_y = cy / n
-                    self._steer_apply_xy(com_x, com_y, cfg.weight_pursuit)
-                    if n >= cfg.sailfish_school_pressure_density_threshold:
-                        com_d2 = com_x * com_x + com_y * com_y
-                        if com_d2 > 1.0:
-                            com_inv = 1.0 / math.sqrt(com_d2)
-                            com_nx  = com_x * com_inv
-                            com_ny  = com_y * com_inv
-                            # cross2d(com_dir, vel) > 0  →  vel is CCW of COM;
-                            # reinforce whichever orbit direction is already set.
-                            vx    = float(self.velocity[0])
-                            vy    = float(self.velocity[1])
-                            cross = com_nx * vy - com_ny * vx
-                            if cross >= 0.0:
-                                pnx = -com_ny;  pny =  com_nx  # CCW tangent
-                            else:
-                                pnx =  com_ny;  pny = -com_nx  # CW tangent
-                            self._steer_apply_xy(
-                                pnx, pny,
-                                cfg.sailfish_school_pressure_strength,
+        if state == "orbit_baitball":
+            if baitball is None or not has_sardines:
+                self.sm_orbit_to_track_school()
+                state = self.state
+            else:
+                self._orbiting_baitball = True
+                self._is_herding = True
+                self._no_sardines_timer = 0.0
+                self._orbit_timer += dt
+
+                n = len(sardines)
+                cx = cy = 0.0
+                for s in sardines:
+                    dx = s._gx - px
+                    dy = s._gy - py
+                    if dx > hw:
+                        dx -= W
+                    elif dx < -hw:
+                        dx += W
+                    if dy > hh:
+                        dy -= H
+                    elif dy < -hh:
+                        dy += H
+                    cx += dx
+                    cy += dy
+                com_x = cx / n
+                com_y = cy / n
+                # Keep loose school COM bias while orbiting to avoid drift.
+                self._steer_apply_xy(com_x, com_y, cfg.weight_pursuit * 0.35)
+                self._apply_herding_pressure(baitball, px, py)
+
+                if self._orbit_timer >= self._orbit_patience_goal:
+                    if self._should_start_baitball_strike(baitball):
+                        self._begin_baitball_strike(baitball, px, py)
+                        self.sm_to_baitball_strike()
+                        self._mark_group_strike("center")
+                        state = self.state
+                    else:
+                        edge_target = self._select_edge_target(sardines, baitball)
+                        if (
+                            edge_target is not None
+                            and self._group_strike_cooldown_timer <= 0.0
+                            and self._baitball_strike_cooldown_timer <= 0.0
+                        ):
+                            chance = max(
+                                0.0,
+                                min(1.0, cfg.sailfish_baitball_edge_target_chance),
                             )
+                            frame_p = 1.0 - ((1.0 - chance) ** max(self._dt, 0.0))
+                            if random.random() < frame_p:
+                                self._target_sardine = edge_target
+                                self._target_lock_timer = cfg.sailfish_target_lock_time
+                                self.sm_orbit_to_target_lock()
+                                self._mark_group_strike("edge")
+                                state = self.state
+
+        if state in ("target_lock", "burst_attack"):
+            if (
+                state == "target_lock"
+                and baitball is not None
+                and cfg.sailfish_target_lock_suppressed_near_baitball
+                and tgt is not None
+                and not self._is_target_on_baitball_edge(tgt, baitball)
+            ):
+                self._target_sardine = None
+                self._target_lock_timer = 0.0
+                self.sm_to_orbit_baitball()
+                self._arm_orbit_patience()
+                state = self.state
+                tgt = None
+
+        if state in ("target_lock", "burst_attack"):
+            if tgt is None:
+                if state == "burst_attack":
+                    self._burst_timer = 0.0
+                    self._burst_cooldown_timer = cfg.sailfish_burst_cooldown
+                    self._recovery_timer = cfg.sailfish_recovery_duration
+                    self.sm_to_recover()
+                    state = self.state
+                else:
+                    self.sm_to_track_school()
+                    state = self.state
+            else:
+                dx = tgt._gx - px
+                dy = tgt._gy - py
+                if dx > hw:
+                    dx -= W
+                elif dx < -hw:
+                    dx += W
+                if dy > hh:
+                    dy -= H
+                elif dy < -hh:
+                    dy += H
+                dist = math.sqrt(dx * dx + dy * dy)
+
+                if (
+                    state == "target_lock"
+                    and dist < cfg.sailfish_burst_trigger_radius
+                    and self._burst_timer <= 0.0
+                    and self._burst_cooldown_timer <= 0.0
+                ):
+                    self._burst_timer = cfg.sailfish_burst_duration
+                    self.sm_to_burst_attack()
+                    state = self.state
+
+                pred_t = min(
+                    dist / max(self.max_speed, 1.0),
+                    cfg.sailfish_prediction_time,
+                )
+                if dist > 1.0:
+                    pdx = dx + tgt._gvx * pred_t
+                    pdy = dy + tgt._gvy * pred_t
+                else:
+                    pdx, pdy = dx, dy
+                self._steer_apply_xy(pdx, pdy, cfg.weight_target_pursuit)
+
+        if state == "baitball_strike":
+            if (
+                baitball is None
+                and self._baitball_strike_timer > cfg.sailfish_baitball_strike_duration_seconds * 0.75
+            ):
+                self._baitball_strike_timer = 0.0
+                self.sm_baitball_to_track_school()
+                state = self.state
+            else:
+                dx = self._baitball_strike_exit_x - px
+                dy = self._baitball_strike_exit_y - py
+                if dx > hw:
+                    dx -= W
+                elif dx < -hw:
+                    dx += W
+                if dy > hh:
+                    dy -= H
+                elif dy < -hh:
+                    dy += H
+                self._steer_apply_xy(
+                    dx,
+                    dy,
+                    max(cfg.weight_target_pursuit, cfg.weight_pursuit) * 1.25,
+                )
+                if (
+                    dx * dx + dy * dy
+                    <= cfg.sailfish_baitball_strike_exit_distance
+                    * cfg.sailfish_baitball_strike_exit_distance
+                ):
+                    self._baitball_strike_timer = 0.0
+                    self._baitball_strike_cooldown_timer = (
+                        cfg.sailfish_baitball_strike_cooldown_seconds
+                    )
+                    self._recovery_timer = cfg.sailfish_recovery_duration
+                    self.sm_to_recover()
+                    state = self.state
+
+        if state == "recover":
+            if has_sardines:
+                self._no_sardines_timer = 0.0
+                if self._should_enter_orbit_baitball(baitball):
+                    self.sm_to_orbit_baitball()
+                    self._arm_orbit_patience()
+                    state = self.state
+                if state == "orbit_baitball":
+                    # Fall through to orbit handling in the next frame.
+                    pass
+                n = len(sardines)
+                cx = cy = 0.0
+                for s in sardines:
+                    dx = s._gx - px
+                    dy = s._gy - py
+                    if dx > hw:
+                        dx -= W
+                    elif dx < -hw:
+                        dx += W
+                    if dy > hh:
+                        dy -= H
+                    elif dy < -hh:
+                        dy += H
+                    cx += dx
+                    cy += dy
+                com_x = cx / n
+                com_y = cy / n
+                self._steer_apply_xy(com_x, com_y, cfg.weight_pursuit)
+                self._apply_herding_pressure(baitball, px, py)
+            else:
+                self._no_sardines_timer += dt
 
         # ── Sailfish flocking: separation / alignment / cohesion ──────
         if self._sailfish_grid is None:
             return
         sf_grid = self._sailfish_grid
-        sep_r2  = self._sf_sep_r2
-        ali_r2  = self._sf_ali_r2
-        w_sep   = cfg.weight_sailfish_separation
-        w_ali   = cfg.weight_sailfish_alignment
-        w_coh   = cfg.weight_sailfish_cohesion
+        sep_r2 = self._sf_sep_r2
+        ali_r2 = self._sf_ali_r2
+        w_sep = cfg.weight_sailfish_separation
+        w_ali = cfg.weight_sailfish_alignment
+        w_coh = cfg.weight_sailfish_cohesion
 
         sf_nb = sf_grid.query(self, cfg.radius_sailfish_cohesion)
         if not sf_nb:
             return
 
-        sf_sx = sf_sy = 0.0       # separation: sum of away-unit-vectors
-        sf_alx = sf_aly = 0.0     # alignment: sum of neighbour velocities
-        sf_cx = sf_cy = 0.0       # cohesion: offset toward COM
+        sf_sx = sf_sy = 0.0
+        sf_alx = sf_aly = 0.0
+        sf_cx = sf_cy = 0.0
         sf_sep_n = sf_ali_n = sf_coh_n = 0
 
         for other in sf_nb:
             dx = px - other._gx
             dy = py - other._gy
-            if dx >  hw: dx -= W
-            elif dx < -hw: dx += W
-            if dy >  hh: dy -= H
-            elif dy < -hh: dy += H
+            if dx > hw:
+                dx -= W
+            elif dx < -hw:
+                dx += W
+            if dy > hh:
+                dy -= H
+            elif dy < -hh:
+                dy += H
             d_sq = dx * dx + dy * dy
             if d_sq <= _EPS2:
                 continue
@@ -366,7 +654,7 @@ class Sailfish(Boid):
                 sf_alx += other._gvx
                 sf_aly += other._gvy
                 sf_ali_n += 1
-            if w_coh != 0.0:   # within coh_r2 guaranteed by query()
+            if w_coh != 0.0:
                 sf_cx -= dx
                 sf_cy -= dy
                 sf_coh_n += 1
@@ -379,3 +667,358 @@ class Sailfish(Boid):
         if sf_coh_n > 0:
             n_inv = 1.0 / sf_coh_n
             self._steer_apply_xy(sf_cx * n_inv, sf_cy * n_inv, w_coh)
+
+    # ------------------------------------------------------------------ #
+    # Private helpers                                                      #
+    # ------------------------------------------------------------------ #
+
+    def _select_target(
+        self,
+        candidates: list,
+        sardines: list,
+        cx: float,
+        cy: float,
+        n: int,
+        acq_r2: float,
+        cfg: SimConfig,
+    ) -> "object":
+        """Pick the most vulnerable sardine from ``candidates``.
+
+        Vulnerability scoring (Phase 3 logic, preserved):
+          proximity  -- closer sardines are easier to intercept.
+          isolation  -- sardines far from the local school COM are exposed.
+          slowness   -- slower sardines are harder to escape.
+
+        Also applies shared-target reduction: when a nearby sailfish already
+        holds the best candidate and an alternative exists, prefer the
+        alternative.
+        """
+        com_x = cx / n
+        com_y = cy / n
+        w_dist     = cfg.sailfish_target_dist_weight
+        w_iso      = cfg.sailfish_target_isolation_weight
+        w_spd      = cfg.sailfish_target_speed_weight
+        inv_acq_r2 = 1.0 / acq_r2
+        inv_awa_r2 = 1.0 / (
+            cfg.radius_sailfish_awareness * cfg.radius_sailfish_awareness
+        )
+        max_spd2 = cfg.sardine_max_speed * cfg.sardine_max_speed
+
+        best_score = -1e18
+        best_s     = None
+        alt_score  = -1e18
+        alt_s      = None
+
+        for dx, dy, d2, s in candidates:
+            iso_d2 = (dx - com_x) ** 2 + (dy - com_y) ** 2
+            s_spd2 = s._gvx * s._gvx + s._gvy * s._gvy
+            score  = (
+                w_dist * (1.0 - d2    * inv_acq_r2)
+                + w_iso  * iso_d2 * inv_awa_r2
+                + w_spd  * (1.0 - min(s_spd2 / max_spd2, 1.0))
+            )
+            if score > best_score:
+                alt_score, alt_s = best_score, best_s
+                best_score, best_s = score, s
+            elif score > alt_score:
+                alt_score, alt_s = score, s
+
+        # Shared-target reduction: if a nearby sailfish already holds best_s
+        # and an alternative exists, yield best_s to the neighbour.
+        if self._sailfish_grid is not None and alt_s is not None:
+            sf_nb = self._sailfish_grid.query(
+                self, cfg.sailfish_target_acquire_radius
+            )
+            if any(other._target_sardine is best_s for other in sf_nb):
+                best_s = alt_s
+
+        return best_s  # type: ignore[return-value]
+
+    def _select_active_baitball(self, dt: float) -> "_BaitballInfo | None":
+        """Choose nearest baitball this frame with short memory fallback."""
+        if not self._config.sailfish_baitball_enabled:
+            self._baitball = None
+            self._baitball_memory_timer = 0.0
+            return None
+
+        px = float(self.position[0])
+        py = float(self.position[1])
+        best = None
+        best_d2 = float("inf")
+        for b in self._baitballs_frame:
+            dx = b.cx - px
+            dy = b.cy - py
+            if dx > self._hw:
+                dx -= self._W
+            elif dx < -self._hw:
+                dx += self._W
+            if dy > self._hh:
+                dy -= self._H
+            elif dy < -self._hh:
+                dy += self._H
+            d2 = dx * dx + dy * dy
+            if d2 < best_d2:
+                best_d2 = d2
+                best = b
+
+        if best is not None:
+            self._baitball = best
+            self._baitball_memory_timer = self._config.sailfish_baitball_memory_seconds
+            return best
+
+        if self._baitball_memory_timer > 0.0 and self._baitball is not None:
+            self._baitball_memory_timer = max(0.0, self._baitball_memory_timer - dt)
+            return self._baitball
+
+        self._baitball = None
+        self._baitball_memory_timer = 0.0
+        return None
+
+    def _should_take_individual_target(self, baitball: "_BaitballInfo | None") -> bool:
+        """Suppress eager target-lock while cooperative baitball herding is active."""
+        cfg = self._config
+        if not cfg.sailfish_herding_enabled or baitball is None:
+            return True
+        if self._sailfish_count < cfg.sailfish_herding_min_sailfish:
+            return True
+        if baitball.density < cfg.sailfish_baitball_density_threshold:
+            return True
+        if not cfg.sailfish_target_lock_suppressed_near_baitball:
+            return True
+        # Require cooperative orbit patience before individual lock.
+        return self._orbit_timer >= self._orbit_patience_goal
+
+    def _should_enter_orbit_baitball(self, baitball: "_BaitballInfo | None") -> bool:
+        """Return True when cooperative orbit should be preferred."""
+        cfg = self._config
+        if baitball is None:
+            return False
+        if not cfg.sailfish_herding_enabled:
+            return False
+        if self._sailfish_count < cfg.sailfish_herding_min_sailfish:
+            return False
+        return baitball.density >= cfg.sailfish_baitball_density_threshold
+
+    def _arm_orbit_patience(self) -> None:
+        """Reset orbit patience window with deterministic per-sailfish jitter."""
+        cfg = self._config
+        self._orbit_timer = 0.0
+        # Deterministic pseudo-random jitter in [-1, 1] by stable id.
+        unit = ((self._sid * 2654435761) & 0xFFFF) / 65535.0
+        signed = unit * 2.0 - 1.0
+        jitter = signed * cfg.sailfish_baitball_patience_jitter_seconds
+        base = max(cfg.sailfish_baitball_patience_seconds, cfg.sailfish_baitball_min_orbit_seconds)
+        self._orbit_patience_goal = max(0.0, base + jitter)
+
+    def _should_start_baitball_strike(self, baitball: "_BaitballInfo") -> bool:
+        """Probabilistic gate for deliberate center pass-through strikes."""
+        cfg = self._config
+        if not cfg.sailfish_baitball_strike_enabled:
+            return False
+        if baitball.density < cfg.sailfish_baitball_strike_density_threshold:
+            return False
+        if self._baitball_strike_cooldown_timer > 0.0:
+            return False
+        if self._baitball_strike_timer > 0.0:
+            return False
+        if self._group_strike_cooldown_timer > 0.0:
+            return False
+        if self._orbit_timer < self._orbit_patience_goal:
+            return False
+
+        # Convert a per-second chance into a frame-probability.
+        chance = max(0.0, min(1.0, cfg.sailfish_baitball_center_strike_chance))
+        frame_p = 1.0 - ((1.0 - chance) ** max(self._dt, 0.0))
+        return random.random() < frame_p
+
+    def _mark_group_strike(self, kind: str) -> None:
+        """Notify Simulation that a group-level strike cooldown should be armed."""
+        self._pending_group_strike_trigger = True
+        self._pending_group_strike_kind = kind
+
+    def _is_target_on_baitball_edge(
+        self,
+        sardine: object,
+        baitball: "_BaitballInfo",
+    ) -> bool:
+        """Edge-target filter: reject targets deep inside the baitball core."""
+        cfg = self._config
+        dx = float(sardine._gx) - baitball.cx
+        dy = float(sardine._gy) - baitball.cy
+        if dx > self._hw:
+            dx -= self._W
+        elif dx < -self._hw:
+            dx += self._W
+        if dy > self._hh:
+            dy -= self._H
+        elif dy < -self._hh:
+            dy += self._H
+        d = math.sqrt(dx * dx + dy * dy)
+        edge_floor = max(0.0, baitball.radius - cfg.sailfish_baitball_edge_band_width)
+        return d >= edge_floor
+
+    def _select_edge_target(
+        self,
+        sardines: list,
+        baitball: "_BaitballInfo",
+    ) -> "object | None":
+        """Pick a sardine near the baitball perimeter for deliberate edge strikes."""
+        cfg = self._config
+        edge_floor = max(0.0, baitball.radius - cfg.sailfish_baitball_edge_band_width)
+
+        best = None
+        best_score = -1e18
+        for s in sardines:
+            dx = float(s._gx) - baitball.cx
+            dy = float(s._gy) - baitball.cy
+            if dx > self._hw:
+                dx -= self._W
+            elif dx < -self._hw:
+                dx += self._W
+            if dy > self._hh:
+                dy -= self._H
+            elif dy < -self._hh:
+                dy += self._H
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist < edge_floor:
+                continue
+
+            # Favor outer-edge and slower fish (more exposed).
+            speed = math.sqrt(float(s._gvx) * float(s._gvx) + float(s._gvy) * float(s._gvy))
+            score = dist - 0.08 * speed
+            if score > best_score:
+                best_score = score
+                best = s
+        return best
+
+    def _begin_baitball_strike(self, baitball: "_BaitballInfo", px: float, py: float) -> None:
+        """Set strike line endpoints and arm the strike timer."""
+        cfg = self._config
+        dx = baitball.cx - px
+        dy = baitball.cy - py
+        if dx > self._hw:
+            dx -= self._W
+        elif dx < -self._hw:
+            dx += self._W
+        if dy > self._hh:
+            dy -= self._H
+        elif dy < -self._hh:
+            dy += self._H
+
+        d2 = dx * dx + dy * dy
+        if d2 <= 1e-9:
+            vx = float(self.velocity[0])
+            vy = float(self.velocity[1])
+            vm2 = vx * vx + vy * vy
+            if vm2 > 1e-9:
+                inv = 1.0 / math.sqrt(vm2)
+                ux = vx * inv
+                uy = vy * inv
+            else:
+                ux, uy = 1.0, 0.0
+        else:
+            inv = 1.0 / math.sqrt(d2)
+            ux = dx * inv
+            uy = dy * inv
+
+        strike_len = baitball.radius + cfg.sailfish_baitball_strike_exit_distance
+        self._baitball_strike_exit_x = (baitball.cx + ux * strike_len) % self._W
+        self._baitball_strike_exit_y = (baitball.cy + uy * strike_len) % self._H
+        self._baitball_strike_timer = cfg.sailfish_baitball_strike_duration_seconds
+        self._target_sardine = None
+        self._target_lock_timer = 0.0
+
+    def _apply_herding_pressure(
+        self,
+        baitball: "_BaitballInfo | None",
+        px: float,
+        py: float,
+    ) -> None:
+        """Push sailfish onto distributed pressure slots around dense schools."""
+        cfg = self._config
+        if baitball is None or not cfg.sailfish_herding_enabled:
+            return
+        if self._sailfish_count < cfg.sailfish_herding_min_sailfish:
+            return
+        if baitball.density < cfg.sailfish_baitball_density_threshold:
+            return
+
+        self._is_herding = True
+        self._orbiting_baitball = True
+
+        slot_count = max(cfg.sailfish_herding_min_sailfish, self._sailfish_count)
+        slot = (self._sid + baitball.bid * 7) % slot_count
+        base_theta = (2.0 * math.pi * slot) / slot_count
+        jitter = math.sin(self.age * 0.9 + self._sid * 1.73) * cfg.sailfish_baitball_slot_jitter
+        theta = base_theta + self.age * cfg.sailfish_baitball_orbit_rotation_speed + jitter
+
+        pressure_r = baitball.radius * cfg.sailfish_baitball_orbit_radius_multiplier
+        tx = (baitball.cx + math.cos(theta) * pressure_r) % self._W
+        ty = (baitball.cy + math.sin(theta) * pressure_r) % self._H
+
+        dxp = tx - px
+        dyp = ty - py
+        if dxp > self._hw:
+            dxp -= self._W
+        elif dxp < -self._hw:
+            dxp += self._W
+        if dyp > self._hh:
+            dyp -= self._H
+        elif dyp < -self._hh:
+            dyp += self._H
+
+        # Slot-hold force keeps each sailfish at a stable orbit assignment.
+        self._steer_apply_xy(dxp, dyp, cfg.sailfish_herding_pressure_strength)
+
+        # Tangential force makes sailfish circle baitball perimeter.
+        dx_center = baitball.cx - px
+        dy_center = baitball.cy - py
+        if dx_center > self._hw:
+            dx_center -= self._W
+        elif dx_center < -self._hw:
+            dx_center += self._W
+        if dy_center > self._hh:
+            dy_center -= self._H
+        elif dy_center < -self._hh:
+            dy_center += self._H
+        d2_center = dx_center * dx_center + dy_center * dy_center
+        if d2_center > 1.0:
+            inv = 1.0 / math.sqrt(d2_center)
+            nx = dx_center * inv
+            ny = dy_center * inv
+            tangent_x = -ny
+            tangent_y = nx
+            self._steer_apply_xy(
+                tangent_x,
+                tangent_y,
+                cfg.sailfish_baitball_orbit_tangent_strength,
+            )
+
+        # Mild inward pressure from the slot keeps compression believable.
+        self._steer_apply_xy(
+            dx_center,
+            dy_center,
+            cfg.sailfish_baitball_inward_pressure_strength,
+        )
+
+    def _apply_school_pressure(self, com_x: float, com_y: float) -> None:
+        """Add a tangential orbit force around the school COM.
+
+        Reinforces whichever circular direction is already set by the
+        current velocity so sailfish circle rather than always diving in.
+        """
+        cfg    = self._config
+        com_d2 = com_x * com_x + com_y * com_y
+        if com_d2 <= 1.0:
+            return
+        com_inv = 1.0 / math.sqrt(com_d2)
+        com_nx  = com_x * com_inv
+        com_ny  = com_y * com_inv
+        vx = float(self.velocity[0])
+        vy = float(self.velocity[1])
+        cross = com_nx * vy - com_ny * vx
+        if cross >= 0.0:
+            pnx = -com_ny;  pny =  com_nx   # CCW tangent
+        else:
+            pnx =  com_ny;  pny = -com_nx   # CW tangent
+        self._steer_apply_xy(pnx, pny, cfg.sailfish_school_pressure_strength)

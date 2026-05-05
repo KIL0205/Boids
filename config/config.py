@@ -24,11 +24,8 @@ class SimConfig:
     target_fps: int = 60
 
     # ── Population ────────────────────────────────────────────────────
-    # Reduced from 900 to 300 for ecology balance: 900 sardines deplete 500
-    # algae in seconds, leaving no time for reproduction or starvation
-    # dynamics to play out.  300 sardines with respawn creates a sustainable
-    # food cycle.  Increase with ↑ key once you want a pure-flocking view.
-    num_sardines: int = 300
+    # Tuned baseline school size used by current project profile.
+    num_sardines: int = 2518
 
     # ── Sardine kinematics ────────────────────────────────────────────
     sardine_max_speed: float = 150.0    # pixels / second (~1.5 m/s if 1 px ≈ 1 cm)
@@ -42,17 +39,17 @@ class SimConfig:
     #   sep: 2.0 × 150 / 60 ≈ 5.0 px/s   ali: 1.3 × 150 / 60 ≈ 3.3 px/s
     # Priority order: separation > alignment > cohesion (Reynolds convention).
     weight_separation: float = 2.0      # highest: prevent overlap above all else
-    weight_alignment: float  = 1.3      # strong: heading coherence is key to schooling
-    weight_cohesion: float   = 1.0      # baseline: gentle pull toward group centre
+    weight_alignment: float  = 1.2      # strong: heading coherence is key to schooling
+    weight_cohesion: float   = 1.2      # baseline: gentle pull toward group centre
     # Small random nudge each frame — prevents rigid lock-in and adds organic feel.
     # Keep ≤ 0.05 so it never overwhelms a real force; set to 0.0 to disable.
-    weight_noise: float      = 0.04
+    weight_noise: float      = 0.02
 
     # ── Sardine perception radii ──────────────────────────────────────
     # Radii must satisfy: r_separation < r_alignment ≤ r_cohesion ≤ cell_size.
-    radius_separation: float = 40.0    # personal space (~3 body-lengths at size=6)
-    radius_alignment: float  = 75.0    # match headings; broader window → tighter school
-    radius_cohesion: float   = 80.0    # group attraction; must equal cell_size or less
+    radius_separation: float = 34.0    # personal space (~3 body-lengths at size=6)
+    radius_alignment: float  = 85.0    # match headings; broader window → tighter school
+    radius_cohesion: float   = 90.0    # group attraction; must equal cell_size or less
 
     # ── Spatial hash grid ─────────────────────────────────────────────
     # For best performance cell_size >= radius_cohesion, ensuring a single
@@ -82,7 +79,7 @@ class SimConfig:
     #   "ocean"   — deep aquatic blue-teal-green (slightly dimmer)
     #   "sunset"  — purples / magentas / pinks with orange wrap
     #   "mono"    — grayscale mapping
-    sardine_color_palette: str = "white"
+    sardine_color_palette: str = "cool"
 
     # Per-channel kinematic weights for velocity-driven sardine coloring.
     # Dimensionless multipliers; 0.0 = that channel is silent.
@@ -91,10 +88,10 @@ class SimConfig:
     # Speed weight (0–2):    hue offset from forward speed (≤¼ wheel at w=1).
     # Turn weight (0–2):     how aggressively turning desaturates the color.
     # Smoothing (0–0.99):    EMA coefficient for per-fish turn-rate estimate.
-    vel_color_heading_weight: float = 1.0
-    vel_color_speed_weight:   float = 0.5
-    vel_color_turn_weight:    float = 1.0
-    vel_color_smoothing:      float = 0.85
+    vel_color_heading_weight: float = 1.2
+    vel_color_speed_weight:   float = 1.2
+    vel_color_turn_weight:    float = 1.4
+    vel_color_smoothing:      float = 0.84
 
     # Age-driver normalization window.
     # Used only when sardine_color_driver == "age".
@@ -102,20 +99,20 @@ class SimConfig:
     sardine_age_gradient_seconds: float = 60.0
 
     # ── Sailfish (Phase 2) ────────────────────────────────────────────
-    num_sailfish: int = 8
+    num_sailfish: int = 11
 
     # Sailfish kinematics — real sailfish reach ~3× sardine sprint speed;
     # 250 px/s (≈ 1.67× sardine max) keeps pursuits visible and winnable.
     # Force/speed ratio = 0.8 (< sardine's 1.0) → wider, less snappy turns.
     sailfish_max_speed: float = 250.0   # px/s
     sailfish_min_speed: float = 80.0    # always swimming; no stall
-    sailfish_max_force: float = 200.0   # steering budget (px/s²)
+    sailfish_max_force: float = 120.0   # steering budget (px/s²)
 
     # How far a sailfish can see sardines.
-    radius_sailfish_awareness: float = 200.0  # px
+    radius_sailfish_awareness: float = 350.0  # px
 
     # Multiplier on the Reynolds pursuit steer force (long-range COM chase).
-    weight_pursuit: float = 1.5
+    weight_pursuit: float = 1.6
 
     # ── Sailfish individual prey targeting ────────────────────────────
     # When a sardine enters sailfish_target_acquire_radius, the sailfish locks
@@ -144,9 +141,66 @@ class SimConfig:
     # another burst can fire.  Set burst_duration=0.0 to disable entirely.
     sailfish_burst_trigger_radius:  float = 90.0    # px; locked target closer than this → trigger
     sailfish_burst_duration:        float = 0.6     # s; how long one burst lasts
-    sailfish_burst_cooldown:        float = 2.5     # s; recovery gap between bursts
+    sailfish_burst_cooldown:        float = 5.0     # s; recovery gap between bursts
     sailfish_burst_speed_mult:      float = 1.45    # multiplier on sailfish_max_speed
-    sailfish_burst_force_mult:      float = 1.8     # multiplier on sailfish_max_force
+    sailfish_burst_force_mult:      float = 1.6     # multiplier on sailfish_max_force
+
+    # ── Sailfish state machine (Phase SM) ─────────────────────────────
+    # recovery_duration:    seconds in RECOVER state after a burst ends before
+    #                       re-evaluating target or returning to TRACK_SCHOOL.
+    # prediction_time:      max look-ahead cap (seconds) for predictive
+    #                       interception during TARGET_LOCK / BURST_ATTACK.
+    #                       Replaces the previous hardcoded 0.5 s cap.
+    # no_sardines_timeout:  seconds in TRACK_SCHOOL without any visible sardine
+    #                       before falling back to PATROL wander.
+    sailfish_recovery_duration:   float = 1.5   # s
+    sailfish_prediction_time:     float = 0.25  # s
+    sailfish_no_sardines_timeout: float = 5.0   # s
+
+    # ── Sailfish baitball detection ───────────────────────────────────
+    # Dense-school detector used for cooperative herding and strike passes.
+    sailfish_baitball_enabled:            bool  = True
+    sailfish_baitball_detection_radius:   float = 120.0
+    sailfish_baitball_min_sardines:       int   = 24
+    sailfish_baitball_density_threshold:  float = 0.24
+    sailfish_baitball_memory_seconds:     float = 1.8
+
+    # Suppress eager individual lock while a useful baitball exists.
+    sailfish_target_lock_suppressed_near_baitball: bool = True
+
+    # Cooperative orbit patience gates.
+    sailfish_baitball_patience_seconds:            float = 2.4
+    sailfish_baitball_min_orbit_seconds:           float = 1.8
+    sailfish_baitball_patience_jitter_seconds:     float = 0.9
+    sailfish_baitball_strike_group_cooldown_seconds: float = 2.2
+
+    # Deliberate strike mode split: edge target lock vs center pass-through.
+    sailfish_baitball_edge_target_chance:          float = 0.14
+    sailfish_baitball_center_strike_chance:        float = 0.08
+    sailfish_baitball_edge_band_width:             float = 14.0
+
+    # Orbit force model around baitballs.
+    sailfish_baitball_orbit_radius_multiplier:     float = 1.55
+    sailfish_baitball_orbit_tangent_strength:      float = 1.05
+    sailfish_baitball_inward_pressure_strength:    float = 0.34
+    sailfish_baitball_slot_jitter:                 float = 0.18
+    sailfish_baitball_orbit_rotation_speed:        float = 0.52
+
+    # ── Sailfish cooperative herding ──────────────────────────────────
+    sailfish_herding_enabled:             bool  = True
+    sailfish_herding_radius_multiplier:   float = 1.35
+    sailfish_herding_pressure_strength:   float = 0.95
+    sailfish_herding_slot_jitter:         float = 0.35
+    sailfish_herding_min_sailfish:        int   = 3
+
+    # ── Sailfish baitball pass-through strike ─────────────────────────
+    sailfish_baitball_strike_enabled:             bool  = True
+    sailfish_baitball_strike_density_threshold:   float = 0.34
+    sailfish_baitball_strike_chance:              float = 0.08
+    sailfish_baitball_strike_speed_multiplier:    float = 1.55
+    sailfish_baitball_strike_duration_seconds:    float = 0.75
+    sailfish_baitball_strike_cooldown_seconds:    float = 5.0
+    sailfish_baitball_strike_exit_distance:       float = 36.0
 
     # ── Sailfish Phase 3: vulnerable-target selection ────────────────────
     # Each factor is a dimensionless weight; set to 0.0 to disable that factor.
@@ -155,8 +209,8 @@ class SimConfig:
     #            are on the edge of the school and harder for neighbors to cover.
     # slowness:  prefer sardines moving slower than sardine_max_speed.
     sailfish_target_dist_weight:      float = 1.0
-    sailfish_target_isolation_weight: float = 1.2
-    sailfish_target_speed_weight:     float = 0.5
+    sailfish_target_isolation_weight: float = 1.4
+    sailfish_target_speed_weight:     float = 0.8
 
     # ── Sailfish Phase 3: dense-school pressure / orbit ──────────────────
     # When a sailfish sees >= density_threshold sardines within awareness radius
@@ -165,17 +219,17 @@ class SimConfig:
     # strength:          force multiplier on the perpendicular steer (0 = off).
     # density_threshold: minimum visible sardines to activate the orbit bias.
     sailfish_school_pressure_strength:           float = 0.8
-    sailfish_school_pressure_density_threshold:  int   = 8
+    sailfish_school_pressure_density_threshold:  int   = 11
 
     # ── Sailfish flocking (sailfish-vs-sailfish interactions) ─────────────
     # Separation is the primary mechanism — spreads sailfish around prey
     # instead of stacking.  Alignment adds light heading coordination.
     # Cohesion is off by default; pursuit already clusters them near prey.
     weight_sailfish_separation: float = 3.0    # stronger than sardine sep (2.0)
-    weight_sailfish_alignment:  float = 0.5    # mild heading match
+    weight_sailfish_alignment:  float = 0.0    # mild heading match
     weight_sailfish_cohesion:   float = 0.0    # off; let pursuit handle grouping
-    radius_sailfish_separation: float = 80.0   # px; ~2 sailfish body-lengths at size=12
-    radius_sailfish_alignment:  float = 150.0  # px
+    radius_sailfish_separation: float = 52.0   # px; ~2 sailfish body-lengths at size=12
+    radius_sailfish_alignment:  float = 100.0  # px
     radius_sailfish_cohesion:   float = 150.0  # px; == alignment so coh neighbours also align
 
     sailfish_size: float = 12.0     # 2× sardine; body ≈ 36 px
@@ -187,11 +241,11 @@ class SimConfig:
     #   "red"     — bright red
     #   "blue"    — electric blue
     #   "black"   — near-black (still visible against the dark background)
-    sailfish_color_mode: str = "default"
+    sailfish_color_mode: str = "white"
 
     # ── Sardine flee / predator-awareness ─────────────────────────────
-    radius_flee: float = 100.0      # px; sailfish within this trigger escape
-    weight_flee: float = 10.0       # must exceed weight_separation (2.0)
+    radius_flee: float = 140.0      # px; sailfish within this trigger escape
+    weight_flee: float = 20.0       # must exceed weight_separation (2.0)
 
     # Cell size for the sailfish-only spatial hash.
     sailfish_cell_size: float = 120.0
@@ -245,25 +299,25 @@ class SimConfig:
     # Uses a fractional accumulator so non-integer rates (e.g. 3.7/s) work
     # correctly without bias.  Set to 0.0 to disable respawn entirely
     # (useful for tests / debugging a finite-resource scenario).
-    algae_respawn_rate: float = 8.0
+    algae_respawn_rate: float = 150.0
 
     # Soft cap on the total algae population.  Respawn is paused while
     # len(algae) >= algae_max_count so the pool never grows unboundedly
     # when sardines are absent.  Must be >= num_algae for a sensible
     # starting state.
-    algae_max_count: int = 1200
+    algae_max_count: int = 2400
 
     # Soft cap on the total sardine population.  Reproduction is blocked while
     # len(sardines) >= sardine_max_count so the school cannot grow unboundedly
     # through unchecked reproduction.  0 = no cap (unlimited growth).
     # Manual keyboard spawns (↑ key) are not restricted by this cap.
-    sardine_max_count: int = 600
+    sardine_max_count: int = 3000
 
     # Soft cap on the total sailfish population.  Reproduction is blocked while
     # len(sailfish) >= sailfish_max_count so the pack cannot grow unboundedly.
     # 0 = no cap (unlimited growth).
     # Manual keyboard spawns (→ key) are not restricted by this cap.
-    sailfish_max_count: int = 40
+    sailfish_max_count: int = 9
 
     # Number of algae a sardine must consume before it reproduces (splits).
     # food_counter is decremented by this amount on reproduction so any
@@ -272,7 +326,7 @@ class SimConfig:
     # threshold 5 made reproduction extremely rare.  3 algae is achievable
     # within a school pass through a well-stocked area.
     # Set to 0 to disable reproduction entirely (useful for tests/debugging).
-    sardine_eat_threshold: int = 3
+    sardine_eat_threshold: int = 2
 
     # ── Sardine ecology: starvation (Phase 8.5) ──────────────────────
     # How long (seconds) a sardine can go without eating before it dies.
@@ -307,12 +361,11 @@ class SimConfig:
     # Increased from 45 → 90 s: with a sardine school that may evade for
     # extended periods, 45 s was too tight.  90 s gives sailfish a realistic
     # survival window even when sardines are sparse.
-    sailfish_starvation_time: float = 90.0
+    sailfish_starvation_time: float = 14.0
 
     # Initial value for sailfish.hunger_timer at spawn.  Must be strictly less
     # than sailfish_starvation_time.  Staggers the earliest possible death.
-    # Increased from 20 → 40 s to match the longer starvation threshold.
-    sailfish_initial_hunger_time: float = 40.0
+    sailfish_initial_hunger_time: float = 7.0
 
     # ── Sailfish ecology: reproduction (Phase 8.8) ────────────────────
     # Number of sardines a sailfish must eat before producing one offspring.
@@ -320,7 +373,7 @@ class SimConfig:
     # Default of 8: each sardine eaten increments food_counter by 1; with
     # 8 sailfish hunting actively, at ~1 kill per sailfish every few seconds
     # a single sailfish reaches threshold roughly every 30–60 seconds.
-    sailfish_eat_threshold: int = 8
+    sailfish_eat_threshold: int = 40
 
     # Runtime toggles for sailfish ecology mechanics.
     # When False the corresponding pass is skipped entirely each update(),

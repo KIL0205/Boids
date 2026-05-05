@@ -17,6 +17,7 @@ manages world state.
 from __future__ import annotations
 
 import collections
+import dataclasses
 import math
 from typing import TYPE_CHECKING
 
@@ -51,6 +52,18 @@ class _MouseStimulus:
         self.radius:           float = radius
         self.radius_sq:        float = radius * radius
         self.flee_weight_mult: float = flee_weight_mult
+
+
+@dataclasses.dataclass(frozen=True)
+class _BaitballInfo:
+    """Lightweight dense-school summary used by sailfish cooperation logic."""
+
+    bid: int
+    cx: float
+    cy: float
+    radius: float
+    count: int
+    density: float
 
 
 class Simulation:
@@ -193,6 +206,17 @@ class Simulation:
             (0.0, len(self.sardines), len(self.sailfish), len(self.algae))
         )
 
+        # ── Cooperative sailfish debug side-channel ───────────────────
+        self._baitballs: list[_BaitballInfo] = []
+        self.debug_baitball_count: int = 0
+        self.debug_baitball_max_density: float = 0.0
+        self.debug_herding_sailfish: int = 0
+        self.debug_orbit_sailfish: int = 0
+        self.debug_group_strike_cooldown: float = 0.0
+        self.stats_center_strikes: int = 0
+        self.stats_edge_strikes: int = 0
+        self._baitball_group_strike_cooldown_timer: float = 0.0
+
     # ── Initialisation ────────────────────────────────────────────────
 
     def _spawn_sardines(self) -> None:
@@ -327,6 +351,30 @@ class Simulation:
         for a in self.algae:
             _algae_insert(a)
 
+        # Dense-school detector for cooperative sailfish logic.
+        self._baitballs = self._detect_baitballs()
+        self.debug_baitball_count = len(self._baitballs)
+        if self._baitballs:
+            self.debug_baitball_max_density = max(b.density for b in self._baitballs)
+        else:
+            self.debug_baitball_max_density = 0.0
+
+        if self._baitball_group_strike_cooldown_timer > 0.0:
+            self._baitball_group_strike_cooldown_timer = max(
+                0.0,
+                self._baitball_group_strike_cooldown_timer - dt,
+            )
+        self.debug_group_strike_cooldown = self._baitball_group_strike_cooldown_timer
+
+        # Feed this frame's baitball snapshots to each sailfish.
+        sf_count = len(self.sailfish)
+        for sf in self.sailfish:
+            sf.set_baitball_context(
+                self._baitballs,
+                sf_count,
+                self._baitball_group_strike_cooldown_timer,
+            )
+
         # 2 — Phase 4A: populate sardine batch arrays and assign indices.
         # _gx/_gy/_gvx/_gvy are already Python floats set by insert() above —
         # no extra numpy reads.  _idx is needed by Phase 4C to address rows.
@@ -350,8 +398,32 @@ class Simulation:
             self._batch_compute_sardine_forces()
         for agent in self.sailfish:
             agent.update(dt)
+        # Arm group strike cooldown after all sailfish have made decisions.
+        # This keeps edge/center strike launches visibly staggered.
+        group_triggered = False
+        for sf in self.sailfish:
+            if sf._pending_group_strike_trigger:
+                group_triggered = True
+                if sf._pending_group_strike_kind == "center":
+                    self.stats_center_strikes += 1
+                elif sf._pending_group_strike_kind == "edge":
+                    self.stats_edge_strikes += 1
+                sf._pending_group_strike_trigger = False
+                sf._pending_group_strike_kind = ""
+        if group_triggered:
+            self._baitball_group_strike_cooldown_timer = max(
+                self._baitball_group_strike_cooldown_timer,
+                self.config.sailfish_baitball_strike_group_cooldown_seconds,
+            )
+            self.debug_group_strike_cooldown = self._baitball_group_strike_cooldown_timer
+
         for agent in self.algae:
             agent.update(dt)
+
+        # Lightweight debug count for HUD: how many sailfish are currently
+        # applying cooperative herding pressure.
+        self.debug_herding_sailfish = sum(1 for sf in self.sailfish if sf._is_herding)
+        self.debug_orbit_sailfish = sum(1 for sf in self.sailfish if sf.state == "orbit_baitball")
 
         # 4 — Phase 4B/4C: batch integrate all sardines.
         # _s_acc is already populated by _batch_compute_sardine_forces() above.
@@ -427,13 +499,59 @@ class Simulation:
                 # Decrement individual-target lock timer (counts down to 0, then lock releases).
                 if sf._target_lock_timer > 0.0:
                     sf._target_lock_timer = max(0.0, sf._target_lock_timer - dt)
-                # Burst timers: count down burst; start cooldown when burst expires.
+                # Burst timers: count down burst; start cooldown + enter RECOVER
+                # when burst expires.
                 if sf._burst_timer > 0.0:
                     sf._burst_timer = max(0.0, sf._burst_timer - dt)
                     if sf._burst_timer == 0.0:
                         sf._burst_cooldown_timer = sf._config.sailfish_burst_cooldown
+                        # State machine: BURST_ATTACK → RECOVER.
+                        if sf.state == "burst_attack":
+                            sf.sm_to_recover()
+                            sf._recovery_timer = sf._config.sailfish_recovery_duration
                 elif sf._burst_cooldown_timer > 0.0:
                     sf._burst_cooldown_timer = max(0.0, sf._burst_cooldown_timer - dt)
+
+                # Baitball strike timers: count down strike runtime and move to
+                # RECOVER when complete; maintain separate cooldown.
+                if sf._baitball_strike_timer > 0.0:
+                    sf._baitball_strike_timer = max(0.0, sf._baitball_strike_timer - dt)
+                    if sf._baitball_strike_timer == 0.0:
+                        sf._baitball_strike_cooldown_timer = (
+                            sf._config.sailfish_baitball_strike_cooldown_seconds
+                        )
+                        if sf.state == "baitball_strike":
+                            sf.sm_to_recover()
+                            sf._recovery_timer = sf._config.sailfish_recovery_duration
+                elif sf._baitball_strike_cooldown_timer > 0.0:
+                    sf._baitball_strike_cooldown_timer = max(
+                        0.0, sf._baitball_strike_cooldown_timer - dt
+                    )
+
+                # Recovery timer: counts down while in RECOVER; when it reaches
+                # 0 pick the next state (TARGET_LOCK if prev target valid, else
+                # TRACK_SCHOOL; TRACK_SCHOOL will time out to PATROL on its own).
+                if sf._recovery_timer > 0.0:
+                    sf._recovery_timer = max(0.0, sf._recovery_timer - dt)
+                    if sf._recovery_timer == 0.0 and sf.state == "recover":
+                        tgt = sf._target_sardine
+                        if sf._baitball is not None and sf._config.sailfish_herding_enabled:
+                            sf.sm_to_orbit_baitball()
+                            sf._arm_orbit_patience()
+                        elif tgt is not None and tgt.is_alive:
+                            sf.sm_to_target_lock()
+                            sf._target_lock_timer = sf._config.sailfish_target_lock_time
+                        else:
+                            sf.sm_to_track_school()
+
+                # No-sardines timeout: TRACK_SCHOOL → PATROL when sardines have
+                # been absent for too long.
+                if (
+                    sf.state == "track_school"
+                    and sf._no_sardines_timer >= sf._config.sailfish_no_sardines_timeout
+                ):
+                    sf._no_sardines_timer = 0.0
+                    sf.sm_to_patrol()
 
         # Sailfish-sardine eating: one kill per sailfish per tick.
         # Runs after sardine reproduction so newly born sardines are not in
@@ -1052,6 +1170,160 @@ class Simulation:
             acc[0] = 0.0
             acc[1] = 0.0
 
+    # ── Cooperative baitball detection ───────────────────────────────
+
+    def _wrap_delta(self, dx: float, dy: float, W: float, H: float) -> tuple[float, float]:
+        """Return toroidally corrected vector components for world size W×H."""
+        hw = W * 0.5
+        hh = H * 0.5
+        if dx > hw:
+            dx -= W
+        elif dx < -hw:
+            dx += W
+        if dy > hh:
+            dy -= H
+        elif dy < -hh:
+            dy += H
+        return dx, dy
+
+    def _detect_baitballs(self) -> list[_BaitballInfo]:
+        """Approximate dense sardine clusters from sardine-grid neighborhoods.
+
+        The detector iterates occupied sardine cells and evaluates only local
+        neighbourhoods sized by ``sailfish_baitball_detection_radius``.  This
+        avoids global pairwise clustering while still capturing dense schools.
+        """
+        cfg = self.config
+        if not cfg.sailfish_baitball_enabled:
+            return []
+        if not self.sardines:
+            return []
+
+        detect_r = float(cfg.sailfish_baitball_detection_radius)
+        if detect_r <= 1.0:
+            return []
+
+        min_count = max(2, int(cfg.sailfish_baitball_min_sardines))
+        density_threshold = float(cfg.sailfish_baitball_density_threshold)
+        detect_r2 = detect_r * detect_r
+
+        W = float(cfg.window_width)
+        H = float(cfg.window_height)
+
+        grid = self._grid
+        cells = grid._cells
+        if not cells:
+            return []
+
+        span = max(1, math.ceil(detect_r / grid.cell_size))
+        nc = grid._num_cols
+        nr = grid._num_rows
+
+        candidates: list[_BaitballInfo] = []
+
+        for (col_c, row_c), owner_cell in cells.items():
+            if not owner_cell:
+                continue
+
+            anchor = owner_cell[0]
+            ax = float(anchor._gx)
+            ay = float(anchor._gy)
+
+            neigh: list = []
+            if nc > 2 * span and nr > 2 * span:
+                for dc in range(-span, span + 1):
+                    col = (col_c + dc) % nc
+                    for dr in range(-span, span + 1):
+                        ncell = cells.get((col, (row_c + dr) % nr))
+                        if ncell is not None:
+                            neigh.extend(ncell)
+            else:
+                visited: set[tuple[int, int]] = set()
+                for dc in range(-span, span + 1):
+                    col = (col_c + dc) % nc
+                    for dr in range(-span, span + 1):
+                        key = (col, (row_c + dr) % nr)
+                        if key in visited:
+                            continue
+                        visited.add(key)
+                        ncell = cells.get(key)
+                        if ncell is not None:
+                            neigh.extend(ncell)
+
+            if len(neigh) < min_count:
+                continue
+
+            local: list[tuple[float, float, object]] = []
+            sx = sy = 0.0
+            for s in neigh:
+                dx = float(s._gx) - ax
+                dy = float(s._gy) - ay
+                dx, dy = self._wrap_delta(dx, dy, W, H)
+                d2 = dx * dx + dy * dy
+                if d2 <= detect_r2:
+                    local.append((dx, dy, s))
+                    sx += dx
+                    sy += dy
+
+            n_local = len(local)
+            if n_local < min_count:
+                continue
+
+            cx = (ax + sx / n_local) % W
+            cy = (ay + sy / n_local) % H
+
+            max_d2 = 0.0
+            for _, _, s in local:
+                dx = float(s._gx) - cx
+                dy = float(s._gy) - cy
+                dx, dy = self._wrap_delta(dx, dy, W, H)
+                d2 = dx * dx + dy * dy
+                if d2 > max_d2:
+                    max_d2 = d2
+
+            # Radius floor avoids runaway density from nearly coincident points.
+            rad = max(8.0, math.sqrt(max_d2))
+            # Radius-normalized density score keeps thresholds human-scaled.
+            density = n_local / rad
+            if density < density_threshold:
+                continue
+
+            info = _BaitballInfo(
+                bid=0,
+                cx=cx,
+                cy=cy,
+                radius=rad,
+                count=n_local,
+                density=density,
+            )
+
+            merged = False
+            for i, old in enumerate(candidates):
+                dx = info.cx - old.cx
+                dy = info.cy - old.cy
+                dx, dy = self._wrap_delta(dx, dy, W, H)
+                merge_r = min(info.radius, old.radius) * 0.75
+                if dx * dx + dy * dy <= merge_r * merge_r:
+                    new_score = info.density * info.count
+                    old_score = old.density * old.count
+                    if new_score > old_score:
+                        candidates[i] = info
+                    merged = True
+                    break
+            if not merged:
+                candidates.append(info)
+
+        if not candidates:
+            return []
+
+        # Keep a small, stable subset so sailfish selection stays cheap.
+        candidates.sort(key=lambda b: (b.density * b.count), reverse=True)
+        trimmed = candidates[:4]
+        return [
+            dataclasses.replace(b, bid=i)
+            for i, b in enumerate(trimmed)
+        ]
+
     # ── Resize / config propagation ──────────────────────────────────
 
     def resize(self, new_w: int, new_h: int) -> None:
@@ -1159,6 +1431,16 @@ class Simulation:
             agent._target_lock_timer = 0.0
             agent._burst_timer          = 0.0
             agent._burst_cooldown_timer = 0.0
+            agent._baitball_strike_timer = 0.0
+            agent._baitball_strike_cooldown_timer = 0.0
+            agent._baitball_memory_timer = 0.0
+            agent._baitball = None
+            agent._is_herding = False
+            agent._orbiting_baitball = False
+            agent._orbit_timer = 0.0
+            agent._orbit_patience_goal = 0.0
+            agent._pending_group_strike_trigger = False
+            agent._pending_group_strike_kind = ""
         for agent in self.algae:
             agent._config   = new_config
             agent._sep_r2   = new_config.radius_algae_separation ** 2
@@ -1175,6 +1457,8 @@ class Simulation:
         ms.radius           = new_config.mouse_predator_radius
         ms.radius_sq        = new_config.mouse_predator_radius ** 2
         ms.flee_weight_mult = new_config.mouse_predator_flee_weight
+        self._baitball_group_strike_cooldown_timer = 0.0
+        self.debug_group_strike_cooldown = 0.0
 
     # ── Mouse predator interface ──────────────────────────────────────
 

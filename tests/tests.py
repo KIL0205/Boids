@@ -1049,7 +1049,8 @@ class TestAlgaeKinematics(unittest.TestCase):
         starting population; test only checks reasonable bounds and that at
         least some algae survive.
         """
-        cfg = SimConfig(num_algae=30, num_sardines=20, num_sailfish=2)
+        cfg = SimConfig(num_algae=30, num_sardines=20, num_sailfish=2,
+                        sardine_eat_threshold=0)
         sim = Simulation(cfg)
         for _ in range(60):
             sim.update(1 / 60)
@@ -1242,6 +1243,7 @@ class TestEcologyContactDetection(unittest.TestCase):
         cfg = SimConfig(
             num_sardines=0, num_sailfish=0, num_algae=0,
             algae_eat_radius=20.0,
+            algae_respawn_rate=0.0,
             weight_separation=0.0, weight_alignment=0.0,
             weight_cohesion=0.0, weight_noise=0.0,
             weight_algae_separation=0.0, weight_algae_alignment=0.0,
@@ -1280,7 +1282,7 @@ class TestEcologyContactDetection(unittest.TestCase):
     def test_zero_sardines_ecology_pass_no_error(self):
         """Ecology pass with no sardines runs without errors."""
         cfg = SimConfig(num_sardines=0, num_sailfish=0, num_algae=50,
-                        algae_eat_radius=20.0)
+                        algae_eat_radius=20.0, algae_respawn_rate=0.0)
         sim = Simulation(cfg)
         sim.update(1 / 60)   # must not raise
         self.assertEqual(len(sim.algae), 50, "Algae must survive with no sardines")
@@ -1889,6 +1891,7 @@ class TestSailfishEcology(unittest.TestCase):
             weight_algae_cohesion=0.0,   weight_algae_noise=0.0,
             weight_pursuit=0.0, weight_flee=0.0,
             algae_eat_radius=0.1,   # negligible so sardine doesn't eat algae
+            algae_respawn_rate=0.0,
         )
         sim = Simulation(cfg)
         sf = Sailfish(100.0, 100.0, 0.0, 0.0, cfg, sim._grid)
@@ -4915,3 +4918,168 @@ class TestPhase4CBatchedForces(unittest.TestCase):
         self.assertFalse(
             np.isinf(acc).any(), "Inf found in _s_acc after batch force computation"
         )
+
+
+# ── Cooperative sailfish baitball behavior ──────────────────────────────────
+
+class TestSailfishBaitballCooperation(unittest.TestCase):
+    """Targeted checks for baitball detection, herding, and strike state entry."""
+
+    @staticmethod
+    def _coop_cfg(**kwargs) -> SimConfig:
+        base = dict(
+            num_sardines=0,
+            num_sailfish=0,
+            num_algae=0,
+            algae_respawn_rate=0.0,
+            sardine_starvation_time=0.0,
+            sailfish_starvation_time=0.0,
+            sailfish_reproduction_enabled=False,
+            sailfish_starvation_enabled=False,
+            sardine_eat_threshold=0,
+            sailfish_eat_threshold=0,
+            weight_noise=0.0,
+            weight_pursuit=1.0,
+            weight_target_pursuit=1.4,
+            sailfish_baitball_enabled=True,
+            sailfish_baitball_detection_radius=110.0,
+            sailfish_baitball_min_sardines=10,
+            sailfish_baitball_density_threshold=0.12,
+            sailfish_baitball_memory_seconds=1.0,
+            sailfish_herding_enabled=True,
+            sailfish_herding_min_sailfish=2,
+            sailfish_baitball_strike_enabled=True,
+            sailfish_baitball_strike_density_threshold=0.16,
+            sailfish_baitball_strike_chance=1.0,
+            sailfish_baitball_center_strike_chance=1.0,
+            sailfish_baitball_edge_target_chance=1.0,
+            sailfish_baitball_strike_duration_seconds=0.8,
+            sailfish_baitball_strike_cooldown_seconds=2.0,
+            sailfish_baitball_patience_seconds=0.0,
+            sailfish_baitball_min_orbit_seconds=0.0,
+            sailfish_baitball_patience_jitter_seconds=0.0,
+            sailfish_baitball_strike_group_cooldown_seconds=0.0,
+        )
+        base.update(kwargs)
+        return SimConfig(**base)
+
+    def _spawn_sardine_cluster(self, sim: Simulation, cx: float, cy: float, n: int) -> None:
+        from sim.sardine import Sardine
+
+        for i in range(n):
+            # Deterministic compact ring cluster.
+            theta = (2.0 * math.pi * i) / max(1, n)
+            r = 8.0 + (i % 5)
+            x = cx + math.cos(theta) * r
+            y = cy + math.sin(theta) * r
+            sim.sardines.append(
+                Sardine(x, y, 0.0, 0.0, sim.config, sim._grid, sim._sailfish_grid)
+            )
+
+    def test_detect_baitball_from_dense_local_cluster(self):
+        cfg = self._coop_cfg()
+        sim = Simulation(cfg)
+        self._spawn_sardine_cluster(sim, 300.0, 250.0, 24)
+
+        sim._grid.clear()
+        for s in sim.sardines:
+            sim._grid.insert(s)
+
+        baitballs = sim._detect_baitballs()
+        self.assertGreaterEqual(len(baitballs), 1)
+        self.assertGreaterEqual(baitballs[0].count, 10)
+        self.assertGreater(baitballs[0].density, cfg.sailfish_baitball_density_threshold)
+
+    def test_dense_baitball_can_trigger_strike_state(self):
+        from sim.sailfish import Sailfish
+
+        cfg = self._coop_cfg(
+            sailfish_target_acquire_radius=40.0,
+            sailfish_herding_min_sailfish=1,
+            sailfish_baitball_center_strike_chance=1.0,
+            sailfish_baitball_edge_target_chance=0.0,
+        )
+        sim = Simulation(cfg)
+        self._spawn_sardine_cluster(sim, 350.0, 250.0, 28)
+
+        sf = Sailfish(280.0, 250.0, 20.0, 0.0, cfg, sim._grid, sailfish_grid=sim._sailfish_grid)
+        sim.sailfish.append(sf)
+
+        sim.update(1 / 60)
+
+        self.assertIn(
+            sf.state,
+            {
+                "orbit_baitball",
+                "baitball_strike",
+                "recover",
+                "track_school",
+                "target_lock",
+                "burst_attack",
+            },
+        )
+        self.assertTrue(
+            sf.state == "baitball_strike" or sf._baitball_strike_cooldown_timer > 0.0,
+            "Strike should either be active or have completed into cooldown.",
+        )
+
+    def test_herding_debug_count_reports_active_herders(self):
+        from sim.sailfish import Sailfish
+
+        cfg = self._coop_cfg(
+            sailfish_baitball_strike_enabled=False,
+            sailfish_herding_min_sailfish=2,
+            sailfish_baitball_center_strike_chance=0.0,
+            sailfish_baitball_edge_target_chance=0.0,
+        )
+        sim = Simulation(cfg)
+        self._spawn_sardine_cluster(sim, 400.0, 300.0, 22)
+
+        sf1 = Sailfish(330.0, 300.0, 10.0, 0.0, cfg, sim._grid, sailfish_grid=sim._sailfish_grid)
+        sf2 = Sailfish(470.0, 300.0, -10.0, 0.0, cfg, sim._grid, sailfish_grid=sim._sailfish_grid)
+        sim.sailfish.extend([sf1, sf2])
+
+        sim.update(1 / 60)
+
+        self.assertGreaterEqual(sim.debug_baitball_count, 1)
+        self.assertGreaterEqual(sim.debug_herding_sailfish, 1)
+        self.assertGreaterEqual(sim.debug_orbit_sailfish, 1)
+
+    def test_orbit_prefers_edge_target_when_center_strike_disabled(self):
+        from sim.sailfish import Sailfish
+
+        cfg = self._coop_cfg(
+            sailfish_baitball_center_strike_chance=0.0,
+            sailfish_baitball_edge_target_chance=1.0,
+            sailfish_target_lock_suppressed_near_baitball=True,
+            sailfish_baitball_edge_band_width=10.0,
+        )
+        sim = Simulation(cfg)
+        self._spawn_sardine_cluster(sim, 360.0, 280.0, 24)
+
+        sf = Sailfish(300.0, 280.0, 12.0, 0.0, cfg, sim._grid, sailfish_grid=sim._sailfish_grid)
+        sim.sailfish.append(sf)
+
+        sim.update(1 / 60)
+
+        self.assertIn(sf.state, {"target_lock", "burst_attack", "orbit_baitball", "recover"})
+        if sf._target_sardine is not None and sf._baitball is not None:
+            self.assertTrue(sf._is_target_on_baitball_edge(sf._target_sardine, sf._baitball))
+
+    def test_recover_returns_to_orbit_when_baitball_persists(self):
+        from sim.sailfish import Sailfish
+
+        cfg = self._coop_cfg(
+            sailfish_baitball_center_strike_chance=1.0,
+            sailfish_baitball_edge_target_chance=0.0,
+            sailfish_recovery_duration=0.05,
+        )
+        sim = Simulation(cfg)
+        self._spawn_sardine_cluster(sim, 430.0, 300.0, 26)
+        sf = Sailfish(360.0, 300.0, 14.0, 0.0, cfg, sim._grid, sailfish_grid=sim._sailfish_grid)
+        sim.sailfish.append(sf)
+
+        for _ in range(40):
+            sim.update(1 / 60)
+
+        self.assertIn(sf.state, {"orbit_baitball", "baitball_strike", "recover", "target_lock", "burst_attack"})

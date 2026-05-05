@@ -212,8 +212,29 @@ class Hud:
             if sailfish:
                 avg_sf = sum(sf.hunger_timer for sf in sailfish) / n_f
                 sf_hunger = f"{avg_sf:.1f}s"
+                # State counts only recomputed at 4 Hz.
+                sc = {
+                    "patrol": 0,
+                    "track_school": 0,
+                    "orbit_baitball": 0,
+                    "target_lock": 0,
+                    "burst_attack": 0,
+                    "baitball_strike": 0,
+                    "recover": 0,
+                }
+                for sf in sailfish:
+                    s = getattr(sf, "state", None)
+                    if s in sc:
+                        sc[s] += 1
+                sf_states = (
+                    f"  [P{sc['patrol']} T{sc['track_school']}"
+                    f" O{sc['orbit_baitball']} L{sc['target_lock']}"
+                    f" B{sc['burst_attack']}"
+                    f" X{sc['baitball_strike']} R{sc['recover']}]"
+                )
             else:
                 sf_hunger = "---"
+                sf_states = ""
 
             driver  = cfg.sardine_color_driver
             palette = cfg.sardine_color_palette
@@ -243,7 +264,14 @@ class Hud:
             f"  avg hunger {sar_hunger}\n"
             f"Sailfish: born\u2191{simulation.stats_sailfish_births}"
             f"  starved\u2191{simulation.stats_sailfish_starvations}"
-            f"  avg hunger {sf_hunger}{sf_flags}{color_str}\n"
+            f"  avg hunger {sf_hunger}{sf_states}{sf_flags}{color_str}\n"
+            f"Baitballs {simulation.debug_baitball_count}"
+            f"  dens {simulation.debug_baitball_max_density:.2f}"
+            f"  Herd {simulation.debug_herding_sailfish}"
+            f"  Orbit {simulation.debug_orbit_sailfish}\n"
+            f"Strikes center\u2191{simulation.stats_center_strikes}"
+            f"  edge\u2191{simulation.stats_edge_strikes}"
+            f"  group cd {simulation.debug_group_strike_cooldown:.1f}s\n"
             f"World {W} \u00d7 {H} px\n"
             f"\u2191/\u2193 sardines (+/-50)  \u2190/\u2192 sailfish (+/-1)  "
             f"F fullscreen  H HUD  V color-palette  TAB config"
