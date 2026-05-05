@@ -52,6 +52,26 @@ OVERRIDE_FILE = pathlib.Path(__file__).parent.parent / "boids_overrides.json"
 # Loading stale values from a previous session would break world geometry.
 _RUNTIME_FIELDS: frozenset[str] = frozenset({"window_width", "window_height"})
 
+# Fields that existed in earlier versions but have been superseded.
+# Handled explicitly in load_overrides() for migration; always skipped
+# from the normal field-loading path.
+_SUPERSEDED_FIELDS: frozenset[str] = frozenset({
+    "use_velocity_coloring",   # → sardine_color_driver/palette split
+    "sardine_color_mode",      # → sardine_color_driver + sardine_color_palette
+    "sailfish_color",          # → sailfish_color_mode ("default")
+})
+
+# Valid string option sets for sardine color driver/palette fields.
+_VALID_SARDINE_DRIVERS: frozenset[str] = frozenset({
+    "velocity", "age",
+})
+_VALID_SARDINE_PALETTES: frozenset[str] = frozenset({
+    "white", "rainbow", "cool", "warm", "ocean", "sunset", "mono",
+})
+_VALID_SAILFISH_MODES: frozenset[str] = frozenset({
+    "default", "white", "red", "blue", "black",
+})
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -149,18 +169,59 @@ def load_overrides() -> dict[str, Any]:
     hints = _type_hints()
     result: dict[str, Any] = {}
 
+    # ── Migration pass ────────────────────────────────────────────────
+    # Handle fields that existed in previous versions but have been renamed
+    # or replaced.  Run this before the main field loop so:
+    #   (a) superseded keys don't trigger "unknown field" skip
+    #   (b) if the new key is ALSO present in the file, the explicit value wins
+    if raw.get("use_velocity_coloring") is True:
+        # Old boolean toggle → split driver/palette fields.
+        # Only set defaults when the new keys are not already present.
+        if "sardine_color_driver" not in raw:
+            result["sardine_color_driver"] = "velocity"
+        if "sardine_color_palette" not in raw and "sardine_color_mode" not in raw:
+            result["sardine_color_palette"] = "rainbow"
+
+    # Old combined mode field → split driver + palette.
+    old_mode = raw.get("sardine_color_mode")
+    if isinstance(old_mode, str):
+        if "sardine_color_driver" not in raw:
+            result["sardine_color_driver"] = "age" if old_mode == "age" else "velocity"
+        if "sardine_color_palette" not in raw:
+            if old_mode in _VALID_SARDINE_PALETTES:
+                result["sardine_color_palette"] = old_mode
+            elif old_mode == "age":
+                # Legacy age theme had its own gradient; choose a neutral dynamic
+                # palette for migration while keeping the age driver active.
+                result["sardine_color_palette"] = "rainbow"
+    # "sailfish_color" was a tuple field; "sailfish_color_mode" is its string
+    # replacement.  If only the old key is present, the default ("default") is
+    # used automatically — no explicit migration needed.
+
     for key, value in raw.items():
-        if key in _RUNTIME_FIELDS:
-            # Always set from live window; ignore whatever was saved.
+        if key in _RUNTIME_FIELDS or key in _SUPERSEDED_FIELDS:
             continue
         if key not in hints:
             # Field was removed or renamed since the file was saved.
             continue
         try:
-            result[key] = _coerce(key, value, hints[key])
+            coerced = _coerce(key, value, hints[key])
         except (ValueError, TypeError):
             # Type mismatch — fall back to the code default for this field.
             continue
+
+        # ── String-field validation ───────────────────────────────────
+        # For color-driver/palette enums, reject values outside known sets.
+        if key == "sardine_color_driver" and coerced not in _VALID_SARDINE_DRIVERS:
+            continue
+        if key == "sardine_color_palette" and coerced not in _VALID_SARDINE_PALETTES:
+            continue
+        if key == "sailfish_color_mode" and coerced not in _VALID_SAILFISH_MODES:
+            continue
+
+        # Don't overwrite an already-migrated value with a stale one.
+        if key not in result:
+            result[key] = coerced
 
     return result
 

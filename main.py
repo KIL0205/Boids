@@ -55,9 +55,7 @@ def main() -> None:
 
     # Renderer must be created after the window so the GL context is active.
     renderer = Renderer(config, window)
-    renderer.reset(simulation.sardines, simulation.sailfish)
-
-    # Config menu — drawn on top of the simulation (simulation keeps running).
+    renderer.reset(simulation.sardines, simulation.sailfish, simulation.algae)
     menu = ConfigMenu(window, simulation)
 
     # Mutable cell shared between closures to pass update timing to on_draw.
@@ -86,8 +84,13 @@ def main() -> None:
         simulation.resize(width, height)
         renderer.on_resize(width, height)
         menu.on_resize(width, height)
-        # No renderer.reset() needed here: existing Triangle shapes remain valid;
-        # _sync_shapes updates their vertices every frame automatically.
+        # Full renderer resync after every geometry change.  Resize/fullscreen
+        # events are rare (not 60 fps), so the O(N) shape rebuild is acceptable.
+        # This guarantees that _algae_shape_map, _sardine_shape_map, and
+        # _sailfish_shape_map are perfectly consistent with simulation state
+        # regardless of any reentrant idle() calls that macOS may fire during
+        # the transition (see PROJECT_LOG.md renderer crash-fix notes).
+        renderer.reset(simulation.sardines, simulation.sailfish, simulation.algae)
 
     @window.event
     def on_key_press(symbol: int, modifiers: int) -> None:
@@ -104,35 +107,64 @@ def main() -> None:
             window.close()
         elif symbol == pyglet.window.key.H:
             renderer.toggle_hud()
+        elif symbol == pyglet.window.key.D:
+            renderer.toggle_pop_graph()
         elif symbol == pyglet.window.key.F:
             # Toggle fullscreen; pyglet fires on_resize automatically afterwards.
             window.set_fullscreen(not window.fullscreen)
         elif symbol == pyglet.window.key.V:
             import dataclasses
+            _SARDINE_PALETTES = ("white", "rainbow", "cool", "warm", "ocean", "sunset", "mono")
+            cur  = simulation.config.sardine_color_palette
+            idx  = _SARDINE_PALETTES.index(cur) if cur in _SARDINE_PALETTES else 0
+            next_palette = _SARDINE_PALETTES[(idx + 1) % len(_SARDINE_PALETTES)]
             simulation.apply_config(
                 dataclasses.replace(
                     simulation.config,
-                    use_velocity_coloring=not simulation.config.use_velocity_coloring,
+                    sardine_color_palette=next_palette,
                 )
             )
         # ── Dynamic population controls ───────────────────────────────
         # ↑/↓ : add/remove 50 sardines   ←/→ : remove/add 1 sailfish
         elif symbol == pyglet.window.key.UP:
             simulation.add_sardines(50)
-            renderer.reset(simulation.sardines, simulation.sailfish)
+            renderer.reset(simulation.sardines, simulation.sailfish, simulation.algae)
         elif symbol == pyglet.window.key.DOWN:
             simulation.remove_sardines(50)
-            renderer.reset(simulation.sardines, simulation.sailfish)
+            renderer.reset(simulation.sardines, simulation.sailfish, simulation.algae)
         elif symbol == pyglet.window.key.RIGHT:
             simulation.add_sailfish(1)
-            renderer.reset(simulation.sardines, simulation.sailfish)
+            renderer.reset(simulation.sardines, simulation.sailfish, simulation.algae)
         elif symbol == pyglet.window.key.LEFT:
             simulation.remove_sailfish(1)
-            renderer.reset(simulation.sardines, simulation.sailfish)
+            renderer.reset(simulation.sardines, simulation.sailfish, simulation.algae)
 
     # Mark as ready only after all closures are registered, so on_resize
     # won't fire on any initial geometry event before the simulation exists.
     _ready[0] = True
+
+    # ── Mouse predator event handlers ─────────────────────────────────
+    # Left button press/drag → activate mouse predator at cursor position.
+    # Left button release   → deactivate.
+    # on_mouse_motion is intentionally not hooked: the predator is only
+    # active while the button is held (see spec).
+
+    @window.event
+    def on_mouse_press(x: int, y: int, button: int, modifiers: int) -> None:
+        if button == pyglet.window.mouse.LEFT:
+            simulation.set_mouse_predator(float(x), float(y))
+
+    @window.event
+    def on_mouse_release(x: int, y: int, button: int, modifiers: int) -> None:
+        if button == pyglet.window.mouse.LEFT:
+            simulation.clear_mouse_predator()
+
+    @window.event
+    def on_mouse_drag(
+        x: int, y: int, dx: int, dy: int, buttons: int, modifiers: int
+    ) -> None:
+        if buttons & pyglet.window.mouse.LEFT:
+            simulation.set_mouse_predator(float(x), float(y))
 
     # Advance simulation at the target frame rate; pyglet redraws via on_draw.
     pyglet.clock.schedule_interval(update, 1.0 / config.target_fps)
