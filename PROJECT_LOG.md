@@ -120,6 +120,136 @@ Use supporting files for detail:
   Follow-up ideas: (1) Temporal smoothing of merged baitball centers (EMA over 3–5 frames) would further reduce jitter on diffuse or transitioning schools. (2) A `debug_baitball_raw_candidates_enabled` toggle could be added to the overlay if raw-vs-merged comparison is needed during tuning.  
   Verification: 273/273 tests pass.
 
+- 2026-05-08: Expanded benchmark suite to cover all major simulation subsystems.  
+  Why: the old bench.py only measured four population-scaling scenarios (light/medium/heavy/extreme); it had no coverage of sailfish FSM cost, baitball detection pipeline, cooperative herding overhead, or debug overlay impact. It also reported only avg ms — no p95/p99/min/max.  
+  What changed:
+  - [tests/bench.py](tests/bench.py): Complete rewrite. Key additions:
+    - **`BenchResult` dataclass** with raw per-frame timing list; derives `avg_ms`, `p95_ms`, `p99_ms`, `min_ms`, `max_ms`, `fps`, `elapsed_s` via numpy.
+    - **`Scenario` dataclass** with `config_kwargs` (passed directly to `SimConfig`), `collect_subsystem` flag, and `note` for headless limitations.
+    - **8 named benchmark scenarios** (`BENCHMARK_SCENARIOS`), each isolated to measure a different bottleneck:
+
+      | # | Name | Purpose |
+      |---|---|---|
+      | 1 | `baseline` | Pure sardine flocking — no predators, no ecology |
+      | 2 | `standard_ecology` | Full three-tier ecosystem with reproduction + starvation |
+      | 3 | `sailfish_stress` | 15 sailfish with full FSM (baitball, orbit, herding, strike) |
+      | 4 | `baitball_detect` | 2000 sardines in 900×600 world, detection every frame (no stagger) |
+      | 5 | `coop_herding` | 12 sailfish with cooperative orbit, lateralization, spacing, strike scheduling |
+      | 6 | `debug_off` | Full debug config but master toggle OFF (verifies zero idle overhead) |
+      | 7 | `debug_on` | Full debug config ON (confirms same simulation cost as debug_off) |
+      | 8 | `worst_case` | Max load: 2500 sardines, 1200 algae, 10 sailfish, all features |
+
+    - **Per-frame subsystem timing** via `debug_frame_timing_enabled=True`; avg per-frame ms collected for sardine, sailfish, baitball, algae subsystems when `collect_subsystem=True`.
+    - **Regression guard preserved** (`--test` still runs light/medium/heavy/extreme with existing thresholds).
+    - **New CLI flags**: `--scenario NAME`, `--warmup N`, `--verbose` (subsystem breakdown), `--csv PATH`, `--profile-scenario NAME`.
+    - **Headless note**: scenarios 6/7 confirm that `debug_baitballs_enabled` has zero simulation-side overhead; actual pyglet shape/label rendering cost is only measurable with a display.
+
+  Full benchmark results (300 timed frames, 60 warmup, DT=1/60, world 1920×1080):
+
+  | Scenario | avg ms | p95 ms | p99 ms | fps-equiv | sardine | sailfish | baitball | algae |
+  |---|---|---|---|---|---|---|---|---|
+  | baseline | 16.59 | 18.86 | 19.60 | 60.3 | 15.31 | — | — | — |
+  | standard_ecology | 17.00 | 19.82 | 21.69 | 58.8 | 11.38 | 0.46 | 1.26 | 1.62 |
+  | sailfish_stress | 10.70 | 14.67 | 16.33 | 93.5 | 8.27 | 0.93 | 0.78 | — |
+  | baitball_detect | 29.04 | 30.01 | 31.12 | 34.4 | 22.26 | — | 5.05 | — |
+  | coop_herding | 15.34 | 19.63 | 21.48 | 65.2 | 10.23 | 0.87 | 3.33 | — |
+  | debug_off | 19.68 | 23.69 | 25.07 | 50.8 | 13.73 | 0.55 | 1.52 | 1.23 |
+  | debug_on | 19.61 | 24.35 | 24.95 | 51.0 | 13.67 | 0.52 | 1.52 | 1.27 |
+  | worst_case | 43.66 | 46.54 | 52.61 | 22.9 | 27.63 | 1.83 | 7.79 | 0.70 |
+
+  Key findings from results:
+  - **debug_off vs debug_on**: 19.68ms vs 19.61ms — within measurement noise, confirming `debug_baitballs_enabled` adds zero simulation overhead.
+  - **baitball_detect**: 5.05ms for baitball detection every frame in a dense world (2000 sardines, 900×600) — highest detection cost of any scenario. With `baitball_detect_interval=3` (stagger default), this drops to ~1.7ms effective cost.
+  - **sailfish_stress**: 15 sailfish cost only 0.93ms/frame — individual sailfish AI is cheap; the sardine batch force pass dominates.
+  - **worst_case** baitball 7.79ms (detection every frame at 2500 sardines) confirms stagger is critical for high-population worlds.
+  - Subsystem timing collection uses `debug_frame_timing_enabled=True`; this adds ~0.1ms overhead but is disabled in non-collect scenarios.
+
+  Usage:
+  ```
+  python -m tests.bench                          # all 8 scenarios
+  python -m tests.bench --scenario baitball_detect --verbose
+  python -m tests.bench --profile --profile-scenario worst_case
+  python -m tests.bench --test                   # CI regression guard
+  python -m tests.bench --csv results.csv        # longitudinal comparison
+  ```
+  Verification: 273/273 tests pass.
+
+- 2026-05-07: Performance optimization pass — profiling, numpy vectorization, baitball detection stagger.  
+  Why: at 1500 sardines (heavy) the simulation was consuming 34.9ms/frame. cProfile identified five hot functions accounting for ~78% of simulation CPU.  
+  Profiling findings (heavy scenario, 200 frames):
+
+  | Function | tottime | share | Root cause |
+  |---|---|---|---|
+  | `_batch_compute_sardine_forces` | 3.42s | 35% | Per-cell list alloc + `np.array()` per cell |
+  | `_detect_baitballs` | 2.19s | 22.5% | Per-sardine `_wrap_delta()` Python calls × 9.95M/200 frames |
+  | `spatial_hash.query` | 0.95s | 9.8% | Algae + baitball grid traversal |
+  | `_wrap_delta` | 0.52s | 5.4% | 9.95M bare Python function calls |
+  | `list.append` | 0.49s | 5.1% | 12.1M calls from per-cell neighbor accumulation |
+  | `_select_edge_target` (sailfish) | 0.13s | 1.3% | Per-sardine `math.sqrt` loop × ~300 sardines/call |
+
+  What changed:
+  - [sim/simulation.py](sim/simulation.py):
+    - **`_batch_compute_sardine_forces`**: Replaced per-cell `neigh_list: list = []` + `np.array(neigh_list)` with a pre-allocated reusable `_sf_neigh_buf` (numpy int32, 2× growth). Inner loop now writes `neigh_buf[nb_n] = nb._idx`. `neigh_idx = neigh_buf[:nb_n]` is a view (no allocation). Eliminates 12.1M `list.append` + 20K `np.array()` calls per 200 frames.
+    - **`_detect_baitballs` — full vectorized rewrite**: Neighbor gather loop uses `_bb_neigh_buf` (pre-allocated int32 buffer, grown lazily). Distance pass is fully numpy: `idxs = neigh_buf[:nb_n]`, `P = _s_pos[idxs]`, vectorized toroidal correction via `np.where()`, `d2 = dx*dx + dy*dy`, mask and center computed with numpy reductions. Eliminates 9.95M `_wrap_delta()` Python calls and all per-cell intermediate list allocations.
+    - **`_detect_baitballs` — batch array fallback for direct test calls**: When `_s_n == 0` but sardines exist (test bypasses `update()`), populates `_s_pos` and assigns `_idx` on demand so direct calls work correctly.
+    - **`_merge_baitball_candidates`**: Replaced `dataclasses.replace(ex, ...)` with direct `_BaitballInfo(bid=ex.bid, ...)` constructor calls. Eliminates ~17K `dataclasses.replace` calls per 200 frames.
+    - **Baitball detection stagger**: Added `_baitball_detect_counter` / `_baitball_detect_interval` to `__init__`. `update()` only calls `_detect_baitballs()` once every `baitball_detect_interval` frames; cached result reused between frames. Counter initialized to `interval−1` so detection fires on frame 1 (not delayed).
+    - **Per-subsystem timing**: Added `dbg_ms_sardine_forces`, `dbg_ms_baitball_detect`, `dbg_ms_sailfish_update`, `dbg_ms_algae_update` float fields. When `cfg.debug_frame_timing_enabled`, `update()` wraps each subsystem with `time.perf_counter()` and stores elapsed ms.
+    - **`apply_config`**: Refreshes `_baitball_detect_interval` from `new_config.baitball_detect_interval` on live config changes.
+  - [sim/sailfish.py](sim/sailfish.py):
+    - **`_select_edge_target` — vectorized rewrite**: Replaced per-sardine Python loop (`math.sqrt` per fish) with numpy arrays. Gathers `gxs, gys, gvxs, gvys`, computes toroidal `dx/dy` with `np.where()`, vectorized `dists`, `edge_mask`, `speeds`, `scores`, lateralization bias. `scores[~edge_mask] = -1e18`; `scores.argmax()` selects best. Eliminates O(N_sardines) `math.sqrt` calls per sailfish per frame.
+    - Added `import numpy as np`.
+  - [config/config.py](config/config.py): Added two new fields:
+    - `debug_frame_timing_enabled: bool = False` — enables per-subsystem ms timing row in HUD.
+    - `baitball_detect_interval: int = 3` — controls detection stagger; 1 = every frame, 3 = every 3rd frame (~50ms lag at 60fps).
+  - [config/config_menu.py](config/config_menu.py): Added new PERFORMANCE section with `_ToggleItem("Frame timing HUD")` and `_MenuItem("BB detect intv")` rows.
+  - [rendering/renderer.py](rendering/renderer.py): HUD shows optional timing row `[Timing] Sardine X.XXms  BB X.XXms  SF X.XXms  Algae X.XXms` when `debug_frame_timing_enabled` is true.
+  - [boids_overrides.json](boids_overrides.json): Added `debug_frame_timing_enabled: false` and `baitball_detect_interval: 3`.
+
+  Benchmark results (300 timed frames + 60 warmup, DT=0.0167):
+
+  | Scenario | Before | After | Δ |
+  |---|---|---|---|
+  | light (300 sardines) | 10.95ms | 9.21ms | **−16%** |
+  | medium (800 sardines) | 19.34ms | 16.35ms | **−15%** |
+  | heavy (1500 sardines) | 34.91ms | 28.99ms | **−17%** |
+  | extreme (2000 sardines) | 48.31ms | 46.93ms | **−3%** |
+
+  Remaining opportunities: `spatial_hash.query` (9.8%) could be accelerated with Cython or pre-sorted cell lists; algae update is not yet batched.  
+  Verification: 273/273 tests pass.
+
+- 2026-05-08: Performance optimization pass #2 — allocation pressure reduction in sardine/baitball hot paths.  
+  Why: the expanded benchmark suite showed persistent cost concentration in `_batch_compute_sardine_forces` and `_detect_baitballs`, with worst-case still at ~44ms/frame. cProfile confirmed repeated numpy temp-array creation and per-cell index allocations as dominant overhead in dense scenarios.  
+  What changed:
+  - [sim/simulation.py](sim/simulation.py):
+    - Added persistent reusable int32 buffers on `Simulation` init: `_sf_neigh_buf`, `_sf_owner_buf`, `_bb_neigh_buf`.
+    - `_batch_compute_sardine_forces`: replaced per-cell `np.empty()` owner-index allocation with reusable `_sf_owner_buf` slices; reused `_sf_neigh_buf` without `hasattr` checks; cached `cells.get` in local variable for inner loops.
+    - `_batch_compute_sardine_forces`: switched toroidal corrections from nested `np.where(...)` chains to in-place masked updates (`arr[mask] +=/-= world_size`) for flee, mouse-flee, and cell-pair delta passes, reducing temporary ndarray churn.
+    - `_detect_baitballs`: reused `_bb_neigh_buf` without `hasattr`; switched both toroidal correction passes to in-place masked updates to cut temporary array creation.
+  - [sim/spatial_hash.py](sim/spatial_hash.py):
+    - `insert`: cached `self._cells` local in hot path.
+    - `query`, `query_position`, `query_first`: cached `self._cells.get` and `results.append` as locals to reduce repeated attribute lookups in tight loops.
+
+  Full-suite benchmark comparison (300 timed frames, +60 warmup, same machine/session):
+
+  | Scenario | Before | After | Delta |
+  |---|---|---|---|
+  | baseline | 16.88 ms | 16.26 ms | **-3.7%** |
+  | standard_ecology | 17.21 ms | 16.85 ms | **-2.1%** |
+  | sailfish_stress | 10.60 ms | 10.76 ms | +1.5% (noise) |
+  | baitball_detect | 30.21 ms | 26.86 ms | **-11.1%** |
+  | coop_herding | 15.14 ms | 14.69 ms | **-3.0%** |
+  | debug_off | 20.81 ms | 19.21 ms | **-7.7%** |
+  | debug_on | 19.83 ms | 18.90 ms | **-4.7%** |
+  | worst_case | 44.42 ms | 40.28 ms | **-9.3%** |
+
+  Subsystem deltas in key scenarios:
+  - baseline sardine: 15.60 -> 14.97 ms
+  - baitball_detect sardine: 22.99 -> 20.28 ms; baitball: 5.38 -> 4.83 ms
+  - worst_case sardine: 27.71 -> 24.90 ms; baitball: 8.16 -> 7.19 ms
+
+  Validation: 273/273 unit tests pass after the optimization pass (`python -m unittest tests.tests`).
+
 - 2026-05-07: Fixed `TypeError: Line.__init__() got an unexpected keyword argument 'width'` crash in debug overlay.  
   Why: `pyglet.shapes.Line` in Pyglet 2.1.14 uses `thickness=` not `width=`. All six `pyglet.shapes.Line(...)` calls in [rendering/debug_overlay.py](rendering/debug_overlay.py) were using the unsupported `width=` keyword.  
   What changed: replaced `width=1` and `width=2` with `thickness=1` / `thickness=2` across all six Line constructors. Matches the pattern already used in renderer.py's PopGraph line drawing.  

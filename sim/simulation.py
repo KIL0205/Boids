@@ -195,6 +195,10 @@ class Simulation:
         self._s_vel: np.ndarray = np.zeros((0, 2), dtype=np.float64)
         self._s_acc: np.ndarray = np.zeros((0, 2), dtype=np.float64)
         self._s_n:   int        = 0  # number of live sardines in batch arrays
+        # Reused integer index buffers for hot-path neighbour/owner gathers.
+        self._sf_neigh_buf: np.ndarray = np.empty(64, dtype=np.int32)
+        self._sf_owner_buf: np.ndarray = np.empty(64, dtype=np.int32)
+        self._bb_neigh_buf: np.ndarray = np.empty(64, dtype=np.int32)
 
         # ── Population history (for 'd'-key graph overlay) ────────────
         # Sampled at ~1 Hz of simulated time; deque cap prevents unbounded
@@ -216,6 +220,24 @@ class Simulation:
         self.stats_center_strikes: int = 0
         self.stats_edge_strikes: int = 0
         self._baitball_group_strike_cooldown_timer: float = 0.0
+
+        # ── Baitball detection throttle ───────────────────────────────
+        # Running _detect_baitballs() every frame is expensive (~2ms at 1500
+        # sardines).  Stagger detection to run once every N frames and reuse
+        # the cached result in between.  Baitballs move slowly relative to
+        # frame rate so a 3-frame stagger (50ms at 60fps) is imperceptible.
+        # Initialize at interval-1 so detection fires on the very first frame.
+        self._baitball_detect_counter: int = max(0, max(1, int(config.baitball_detect_interval)) - 1)
+        self._baitball_detect_interval: int = max(1, int(config.baitball_detect_interval))
+
+        # ── Per-subsystem timing (ms per frame, optional profiling HUD) ──
+        # Updated every frame when debug_frame_timing_enabled is True.
+        # Cost when disabled: one bool check per frame.
+        self.dbg_ms_sardine_forces:    float = 0.0
+        self.dbg_ms_baitball_detect:   float = 0.0
+        self.dbg_ms_sailfish_update:   float = 0.0
+        self.dbg_ms_algae_update:      float = 0.0
+        self.dbg_ms_grid_rebuild:      float = 0.0
 
     # ── Initialisation ────────────────────────────────────────────────
 
@@ -352,7 +374,19 @@ class Simulation:
             _algae_insert(a)
 
         # Dense-school detector for cooperative sailfish logic.
-        self._baitballs = self._detect_baitballs()
+        # Throttled: recompute only every _baitball_detect_interval frames to
+        # avoid running the expensive O(cells × neighbors) detection every frame.
+        # Between detection frames the cached _baitballs list is reused as-is.
+        _timing_enabled = self.config.debug_frame_timing_enabled
+        if _timing_enabled:
+            import time as _time
+            _t_bb = _time.perf_counter()
+        self._baitball_detect_counter += 1
+        if self._baitball_detect_counter >= self._baitball_detect_interval:
+            self._baitball_detect_counter = 0
+            self._baitballs = self._detect_baitballs()
+        if _timing_enabled:
+            self.dbg_ms_baitball_detect = (_time.perf_counter() - _t_bb) * 1000.0
         self.debug_baitball_count = len(self._baitballs)
         if self._baitballs:
             self.debug_baitball_max_density = max(b.density for b in self._baitballs)
@@ -403,7 +437,13 @@ class Simulation:
         # Sardines: Phase 4C batch computation directly into _s_acc.
         # Sailfish and algae: full update() unchanged (not batched yet).
         if n > 0:
+            if _timing_enabled:
+                _t_sf_forces = _time.perf_counter()
             self._batch_compute_sardine_forces()
+            if _timing_enabled:
+                self.dbg_ms_sardine_forces = (_time.perf_counter() - _t_sf_forces) * 1000.0
+        if _timing_enabled:
+            _t_sailfish = _time.perf_counter()
         for agent in self.sailfish:
             agent.update(dt)
         # Arm group strike cooldown after all sailfish have made decisions.
@@ -425,8 +465,13 @@ class Simulation:
             )
             self.debug_group_strike_cooldown = self._baitball_group_strike_cooldown_timer
 
+        if _timing_enabled:
+            self.dbg_ms_sailfish_update = (_time.perf_counter() - _t_sailfish) * 1000.0
+            _t_algae = _time.perf_counter()
         for agent in self.algae:
             agent.update(dt)
+        if _timing_enabled:
+            self.dbg_ms_algae_update = (_time.perf_counter() - _t_algae) * 1000.0
 
         # Lightweight debug count for HUD: how many sailfish are currently
         # applying cooperative herding pressure.
@@ -876,9 +921,19 @@ class Simulation:
             # (N, S) pairwise deltas via broadcasting.
             dx_sf = sp[:, 0:1] - sf_x   # (N, S)
             dy_sf = sp[:, 1:2] - sf_y   # (N, S)
-            # Toroidal correction.
-            dx_sf = np.where(dx_sf >  hw, dx_sf - W, np.where(dx_sf < -hw, dx_sf + W, dx_sf))
-            dy_sf = np.where(dy_sf >  hh, dy_sf - H, np.where(dy_sf < -hh, dy_sf + H, dy_sf))
+            # Toroidal correction (in-place to reduce temporary arrays).
+            _m = dx_sf > hw
+            if _m.any():
+                dx_sf[_m] -= W
+            _m = dx_sf < -hw
+            if _m.any():
+                dx_sf[_m] += W
+            _m = dy_sf > hh
+            if _m.any():
+                dy_sf[_m] -= H
+            _m = dy_sf < -hh
+            if _m.any():
+                dy_sf[_m] += H
             d2_sf = dx_sf * dx_sf + dy_sf * dy_sf   # (N, S)
             in_flee = (d2_sf <= flee_r2) & (d2_sf > _EPS2)
             if in_flee.any():
@@ -906,8 +961,18 @@ class Simulation:
         if ms is not None and ms.active and cfg.mouse_predator_enabled:
             mdx = sp[:, 0] - ms.x   # (N,)
             mdy = sp[:, 1] - ms.y
-            mdx = np.where(mdx >  hw, mdx - W, np.where(mdx < -hw, mdx + W, mdx))
-            mdy = np.where(mdy >  hh, mdy - H, np.where(mdy < -hh, mdy + H, mdy))
+            _m = mdx > hw
+            if _m.any():
+                mdx[_m] -= W
+            _m = mdx < -hw
+            if _m.any():
+                mdx[_m] += W
+            _m = mdy > hh
+            if _m.any():
+                mdy[_m] -= H
+            _m = mdy < -hh
+            if _m.any():
+                mdy[_m] += H
             md2 = mdx * mdx + mdy * mdy
             in_mouse = (md2 > _EPS2) & (md2 < ms.radius_sq)
             if in_mouse.any():
@@ -943,24 +1008,36 @@ class Simulation:
         w_ali = cfg.weight_alignment
         w_coh = cfg.weight_cohesion
 
+        # Pre-allocated neighbor index buffer — reused across cells to avoid
+        # per-cell list allocations and np.array() conversions.
+        if self._sf_neigh_buf.shape[0] < n:
+            self._sf_neigh_buf = np.empty(max(n * 2, 64), dtype=np.int32)
+        if self._sf_owner_buf.shape[0] < n:
+            self._sf_owner_buf = np.empty(max(n * 2, 64), dtype=np.int32)
+        neigh_buf = self._sf_neigh_buf
+        owner_buf = self._sf_owner_buf
+        fast_flock = nc > 2 * coh_span and nr > 2 * coh_span
+        cells_get = cells.get
+
         for (col_c, row_c), owner_cell in cells.items():
             M = len(owner_cell)
-            own_idxs = np.empty(M, dtype=np.int32)
+            own_idxs = owner_buf[:M]
             for i, s in enumerate(owner_cell):
                 own_idxs[i] = s._idx
 
-            # Gather neighbour indices from (2·coh_span+1)² cells.
-            # Fast path (span=1, large world): 9 keys are always distinct —
-            # mirrors the same guarantee in SpatialHash.query().
-            neigh_list: list = []
-            if nc > 2 * coh_span and nr > 2 * coh_span:
+            # Gather neighbour indices into the reusable buffer.
+            # Fast path (large world): all cell keys are distinct after modular
+            # reduction — mirrors the guarantee in SpatialHash.query().
+            nb_n = 0
+            if fast_flock:
                 for dc in range(-coh_span, coh_span + 1):
                     col = (col_c + dc) % nc
                     for dr in range(-coh_span, coh_span + 1):
-                        ncell = cells.get((col, (row_c + dr) % nr))
+                        ncell = cells_get((col, (row_c + dr) % nr))
                         if ncell is not None:
                             for nb in ncell:
-                                neigh_list.append(nb._idx)
+                                neigh_buf[nb_n] = nb._idx
+                                nb_n += 1
             else:
                 # Slow path: only hit in tiny worlds / unit-test grids.
                 _vis: set = set()
@@ -971,15 +1048,16 @@ class Simulation:
                         if key in _vis:
                             continue
                         _vis.add(key)
-                        ncell = cells.get(key)
+                        ncell = cells_get(key)
                         if ncell is not None:
                             for nb in ncell:
-                                neigh_list.append(nb._idx)
+                                neigh_buf[nb_n] = nb._idx
+                                nb_n += 1
 
-            if not neigh_list:
+            if nb_n == 0:
                 continue
 
-            neigh_idx = np.array(neigh_list, dtype=np.int32)   # (K,)
+            neigh_idx = neigh_buf[:nb_n]    # view — no allocation
             P_own   = sp[own_idxs]    # (M, 2)
             P_neigh = sp[neigh_idx]   # (K, 2)
             V_neigh = sv[neigh_idx]   # (K, 2)
@@ -988,9 +1066,19 @@ class Simulation:
             # Pairwise deltas — (M, K) via broadcast; (M,1) - (K,) → (M,K).
             dx = P_own[:, 0:1] - P_neigh[:, 0]
             dy = P_own[:, 1:2] - P_neigh[:, 1]
-            # Toroidal correction.
-            dx = np.where(dx >  hw, dx - W, np.where(dx < -hw, dx + W, dx))
-            dy = np.where(dy >  hh, dy - H, np.where(dy < -hh, dy + H, dy))
+            # Toroidal correction (in-place to reduce temporary arrays).
+            _m = dx > hw
+            if _m.any():
+                dx[_m] -= W
+            _m = dx < -hw
+            if _m.any():
+                dx[_m] += W
+            _m = dy > hh
+            if _m.any():
+                dy[_m] -= H
+            _m = dy < -hh
+            if _m.any():
+                dy[_m] += H
             d2 = dx * dx + dy * dy   # (M, K)
 
             # Self-pair exclusion + cohesion radius gate.
@@ -1307,8 +1395,8 @@ class Simulation:
                                  dist_to_cand + cand.radius)
                 new_density = total / new_radius
 
-                final[best_i] = dataclasses.replace(
-                    ex,
+                final[best_i] = _BaitballInfo(
+                    bid=ex.bid,
                     cx=new_cx,
                     cy=new_cy,
                     radius=new_radius,
@@ -1317,7 +1405,9 @@ class Simulation:
                 )
 
         # Assign stable bid indices to final baitballs in score order.
-        return [dataclasses.replace(b, bid=i) for i, b in enumerate(final)]
+        return [_BaitballInfo(bid=i, cx=b.cx, cy=b.cy, radius=b.radius,
+                               count=b.count, density=b.density)
+                for i, b in enumerate(final)]
 
 
     def _detect_baitballs(self) -> list[_BaitballInfo]:
@@ -1326,6 +1416,17 @@ class Simulation:
         The detector iterates occupied sardine cells and evaluates only local
         neighbourhoods sized by ``sailfish_baitball_detection_radius``.  This
         avoids global pairwise clustering while still capturing dense schools.
+
+        Performance notes
+        -----------------
+        * Inner distance loops are vectorised with numpy using the pre-populated
+          ``_s_pos[:_s_n]`` batch array (no per-sardine attribute reads).
+        * The toroidal correction is inlined via numpy where() — eliminates the
+          10 M/frame Python-level ``_wrap_delta()`` calls seen in profiling.
+        * Neighbor index gathering uses a pre-allocated reusable integer buffer
+          (``_bb_neigh_buf``) to avoid per-cell list allocations.
+        * Detection is staggered (called every N frames); the result is cached
+          and reused by the caller between detection frames.
         """
         cfg = self.config
         if not cfg.sailfish_baitball_enabled:
@@ -1341,36 +1442,62 @@ class Simulation:
         density_threshold = float(cfg.sailfish_baitball_density_threshold)
         detect_r2 = detect_r * detect_r
 
-        W = float(cfg.window_width)
-        H = float(cfg.window_height)
+        W  = float(cfg.window_width)
+        H  = float(cfg.window_height)
+        hw = W * 0.5
+        hh = H * 0.5
 
-        grid = self._grid
+        grid  = self._grid
         cells = grid._cells
         if not cells:
             return []
 
         span = max(1, math.ceil(detect_r / grid.cell_size))
-        nc = grid._num_cols
-        nr = grid._num_rows
+        nc   = grid._num_cols
+        nr   = grid._num_rows
+
+        # Pre-populated sardine position batch array (N×2 float64).
+        # Each sardine's row index == s._idx set in the Phase-4A gather loop.
+        # If called directly (e.g. tests bypass update()), populate on demand.
+        sp = self._s_pos   # shape (cap, 2); live rows are [:_s_n]
+        n_s = self._s_n
+        if n_s == 0 and self.sardines:
+            # Fallback: populate arrays without caching (direct call from tests).
+            n_s = len(self.sardines)
+            self._ensure_sardine_capacity(n_s)
+            sp = self._s_pos
+            for i, s in enumerate(self.sardines):
+                s._idx = i
+                sp[i, 0] = s._gx
+                sp[i, 1] = s._gy
+            self._s_n = n_s
+
+        # Reusable integer buffer for neighbor sardine indices — avoids a fresh
+        # list allocation per occupied cell.  Grown lazily via 2× policy.
+        if self._bb_neigh_buf.shape[0] < n_s:
+            cap = max(n_s * 2, 64)
+            self._bb_neigh_buf = np.empty(cap, dtype=np.int32)
+        neigh_buf = self._bb_neigh_buf
 
         candidates: list[_BaitballInfo] = []
+
+        fast_path = nc > 2 * span and nr > 2 * span
 
         for (col_c, row_c), owner_cell in cells.items():
             if not owner_cell:
                 continue
 
-            anchor = owner_cell[0]
-            ax = float(anchor._gx)
-            ay = float(anchor._gy)
-
-            neigh: list = []
-            if nc > 2 * span and nr > 2 * span:
+            # Gather neighbor sardine indices into the reusable buffer.
+            nb_n = 0
+            if fast_path:
                 for dc in range(-span, span + 1):
                     col = (col_c + dc) % nc
                     for dr in range(-span, span + 1):
                         ncell = cells.get((col, (row_c + dr) % nr))
                         if ncell is not None:
-                            neigh.extend(ncell)
+                            for s in ncell:
+                                neigh_buf[nb_n] = s._idx
+                                nb_n += 1
             else:
                 visited: set[tuple[int, int]] = set()
                 for dc in range(-span, span + 1):
@@ -1382,61 +1509,89 @@ class Simulation:
                         visited.add(key)
                         ncell = cells.get(key)
                         if ncell is not None:
-                            neigh.extend(ncell)
+                            for s in ncell:
+                                neigh_buf[nb_n] = s._idx
+                                nb_n += 1
 
-            if len(neigh) < min_count:
+            if nb_n < min_count:
                 continue
 
-            local: list[tuple[float, float, object]] = []
-            sx = sy = 0.0
-            for s in neigh:
-                dx = float(s._gx) - ax
-                dy = float(s._gy) - ay
-                dx, dy = self._wrap_delta(dx, dy, W, H)
-                d2 = dx * dx + dy * dy
-                if d2 <= detect_r2:
-                    local.append((dx, dy, s))
-                    sx += dx
-                    sy += dy
+            # ── Vectorised distance pass (numpy) ───────────────────────────
+            # Use the pre-populated _s_pos batch array so we never call s._gx
+            # or s._gy inside a Python loop.
+            idxs = neigh_buf[:nb_n]          # view — no copy
+            P    = sp[idxs]                  # (K, 2) neighbour positions
 
-            n_local = len(local)
+            anchor = owner_cell[0]
+            ax = anchor._gx
+            ay = anchor._gy
+
+            dx = P[:, 0] - ax
+            dy = P[:, 1] - ay
+
+            # Toroidal correction — in-place to reduce temporary arrays.
+            _m = dx > hw
+            if _m.any():
+                dx[_m] -= W
+            _m = dx < -hw
+            if _m.any():
+                dx[_m] += W
+            _m = dy > hh
+            if _m.any():
+                dy[_m] -= H
+            _m = dy < -hh
+            if _m.any():
+                dy[_m] += H
+            d2 = dx * dx + dy * dy
+
+            mask = d2 <= detect_r2
+            n_local = int(mask.sum())
             if n_local < min_count:
                 continue
 
-            cx = (ax + sx / n_local) % W
-            cy = (ay + sy / n_local) % H
+            dx_l = dx[mask]
+            dy_l = dy[mask]
 
-            max_d2 = 0.0
-            for _, _, s in local:
-                dx = float(s._gx) - cx
-                dy = float(s._gy) - cy
-                dx, dy = self._wrap_delta(dx, dy, W, H)
-                d2 = dx * dx + dy * dy
-                if d2 > max_d2:
-                    max_d2 = d2
+            # Count-weighted centre (relative to anchor, then added back).
+            inv_n = 1.0 / n_local
+            sx    = float(dx_l.sum()) * inv_n
+            sy    = float(dy_l.sum()) * inv_n
+            cx    = (ax + sx) % W
+            cy    = (ay + sy) % H
 
-            # Radius floor avoids runaway density from nearly coincident points.
-            rad = max(8.0, math.sqrt(max_d2))
-            # Radius-normalized density score keeps thresholds human-scaled.
+            # Radius: max distance from centre among local sardines.
+            # Use absolute positions of local sardines for second-pass delta.
+            P_l   = P[mask]                  # (n_local, 2) absolute positions
+            dx2   = P_l[:, 0] - cx
+            dy2   = P_l[:, 1] - cy
+            _m = dx2 > hw
+            if _m.any():
+                dx2[_m] -= W
+            _m = dx2 < -hw
+            if _m.any():
+                dx2[_m] += W
+            _m = dy2 > hh
+            if _m.any():
+                dy2[_m] -= H
+            _m = dy2 < -hh
+            if _m.any():
+                dy2[_m] += H
+            max_d2 = float((dx2 * dx2 + dy2 * dy2).max())
+
+            rad     = max(8.0, math.sqrt(max_d2))
             density = n_local / rad
             if density < density_threshold:
                 continue
 
-            info = _BaitballInfo(
+            candidates.append(_BaitballInfo(
                 bid=0,
                 cx=cx,
                 cy=cy,
                 radius=rad,
                 count=n_local,
                 density=density,
-            )
+            ))
 
-            # Collect every qualifying candidate; the post-detection merge
-            # pass (_merge_baitball_candidates) collapses same-school
-            # duplicates into stable merged baitballs.  The old inline merge
-            # used min(r1, r2)*0.75 which was too conservative and left many
-            # same-school candidates unmerged.
-            candidates.append(info)
 
         if not candidates:
             return []
@@ -1593,6 +1748,8 @@ class Simulation:
         ms.flee_weight_mult = new_config.mouse_predator_flee_weight
         self._baitball_group_strike_cooldown_timer = 0.0
         self.debug_group_strike_cooldown = 0.0
+        # Refresh baitball detection interval from config.
+        self._baitball_detect_interval = max(1, int(new_config.baitball_detect_interval))
 
     # ── Mouse predator interface ──────────────────────────────────────
 

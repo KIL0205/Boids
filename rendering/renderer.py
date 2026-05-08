@@ -274,7 +274,14 @@ class Hud:
             f"Strikes center\u2191{simulation.stats_center_strikes}"
             f"  edge\u2191{simulation.stats_edge_strikes}"
             f"  group cd {simulation.debug_group_strike_cooldown:.1f}s\n"
-            f"World {W} \u00d7 {H} px\n"
+            + (
+                f"[Timing] Sardine {simulation.dbg_ms_sardine_forces:.2f}ms"
+                f"  BB {simulation.dbg_ms_baitball_detect:.2f}ms"
+                f"  SF {simulation.dbg_ms_sailfish_update:.2f}ms"
+                f"  Algae {simulation.dbg_ms_algae_update:.2f}ms\n"
+                if cfg.debug_frame_timing_enabled else ""
+            )
+            + f"World {W} \u00d7 {H} px\n"
             f"\u2191/\u2193 sardines (+/-50)  \u2190/\u2192 sailfish (+/-1)  "
             f"F fullscreen  H HUD  V color-palette  TAB config"
         )

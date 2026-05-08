@@ -1285,6 +1285,30 @@ class SimConfig:
     # sardine target.  Requires debug_baitballs_enabled.
     debug_sailfish_strike_paths_enabled: bool = True
 
+    # ═══════════════════════════════════════════════════════════════════
+    # PERFORMANCE / FRAME TIMING (optional diagnostics)
+    # ═══════════════════════════════════════════════════════════════════
+
+    # Enable per-subsystem frame-timing metrics on the HUD.
+    # When True, the simulation measures milliseconds spent in:
+    #   sardine force computation, baitball detection, sailfish update,
+    #   algae update.
+    # The cost of measurement itself is negligible (one perf_counter() call
+    # per subsystem boundary), but the HUD rendering cost of additional text
+    # lines is non-zero — disable in performance-critical sessions.
+    # Toggle in DEBUG VISUALIZATION config section or via boids_overrides.json.
+    debug_frame_timing_enabled: bool = False
+
+    # How many frames to stagger baitball detection across.
+    # Detection runs on frame N % baitball_detect_interval == 0; between
+    # detection frames the cached result is reused.
+    # • 1  = detect every frame (original behavior, highest quality)
+    # • 3  = detect every 3rd frame (50 ms lag at 60 fps, imperceptible)
+    # • 5  = detect every 5th frame (83 ms lag, light visual stutter possible)
+    # Lower values favour quality; higher values favour performance.
+    # Default 3 gives ~67% reduction in baitball detection cost.
+    baitball_detect_interval: int = 3
+
 
 # Module-level default instance — import this everywhere.
 CONFIG = SimConfig()

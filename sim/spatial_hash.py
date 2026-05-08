@@ -131,10 +131,11 @@ class SpatialHash:
         agent._gvy   = float(avel[1])
         col = int(ax // self.cell_size) % self._num_cols
         row = int(ay // self.cell_size) % self._num_rows
+        _cells = self._cells
         key = (col, row)
-        cell = self._cells.get(key)
+        cell = _cells.get(key)
         if cell is None:
-            self._cells[key] = [agent]
+            _cells[key] = [agent]
         else:
             cell.append(agent)
 
@@ -177,13 +178,16 @@ class SpatialHash:
         col_c  = int(ax // cs)
         row_c  = int(ay // cs)
 
+        cells_get = self._cells.get
+        r_append = results.append
+
         if nc > 2 * span and nr > 2 * span:
             # Fast path: all cell keys in the (2*span+1)² window are distinct
             # after modular reduction → no visited-set needed.
             for dc in range(-span, span + 1):
                 col = (col_c + dc) % nc
                 for dr in range(-span, span + 1):
-                    cell = self._cells.get((col, (row_c + dr) % nr))
+                    cell = cells_get((col, (row_c + dr) % nr))
                     if cell is None:
                         continue
                     for other in cell:
@@ -199,7 +203,7 @@ class SpatialHash:
                         if dy > hh:    dy -= H
                         elif dy < -hh: dy += H
                         if dx * dx + dy * dy <= r2:
-                            results.append(other)
+                            r_append(other)
         else:
             # Slow path: small world or very large radius — use visited set
             # to deduplicate cell keys that collide under modular reduction.
@@ -211,7 +215,7 @@ class SpatialHash:
                     if key in visited:
                         continue
                     visited.add(key)
-                    cell = self._cells.get(key)
+                    cell = cells_get(key)
                     if cell is None:
                         continue
                     for other in cell:
@@ -224,7 +228,7 @@ class SpatialHash:
                         if dy > hh:    dy -= H
                         elif dy < -hh: dy += H
                         if dx * dx + dy * dy <= r2:
-                            results.append(other)
+                            r_append(other)
         return results if results else _EMPTY_LIST
 
     def query_position(
@@ -247,11 +251,14 @@ class SpatialHash:
         col_c = int(x // cs)
         row_c = int(y // cs)
 
+        cells_get = self._cells.get
+        r_append = results.append
+
         if nc > 2 * span and nr > 2 * span:
             for dc in range(-span, span + 1):
                 col = (col_c + dc) % nc
                 for dr in range(-span, span + 1):
-                    cell = self._cells.get((col, (row_c + dr) % nr))
+                    cell = cells_get((col, (row_c + dr) % nr))
                     if cell is None:
                         continue
                     for other in cell:
@@ -262,7 +269,7 @@ class SpatialHash:
                         if dy > hh:    dy -= H
                         elif dy < -hh: dy += H
                         if dx * dx + dy * dy <= r2:
-                            results.append(other)
+                            r_append(other)
         else:
             visited: set[tuple[int, int]] = set()
             for dc in range(-span, span + 1):
@@ -272,7 +279,7 @@ class SpatialHash:
                     if key in visited:
                         continue
                     visited.add(key)
-                    cell = self._cells.get(key)
+                    cell = cells_get(key)
                     if cell is None:
                         continue
                     for other in cell:
@@ -283,7 +290,7 @@ class SpatialHash:
                         if dy > hh:    dy -= H
                         elif dy < -hh: dy += H
                         if dx * dx + dy * dy <= r2:
-                            results.append(other)
+                            r_append(other)
         return results if results else _EMPTY_LIST
 
     def query_first(self, agent: "Boid", radius: float) -> "Boid | None":
@@ -310,11 +317,13 @@ class SpatialHash:
         col_c = int(ax // cs)
         row_c = int(ay // cs)
 
+        cells_get = self._cells.get
+
         if nc > 2 * span and nr > 2 * span:
             for dc in range(-span, span + 1):
                 col = (col_c + dc) % nc
                 for dr in range(-span, span + 1):
-                    cell = self._cells.get((col, (row_c + dr) % nr))
+                    cell = cells_get((col, (row_c + dr) % nr))
                     if cell is None:
                         continue
                     for other in cell:
@@ -337,7 +346,7 @@ class SpatialHash:
                     if key in visited:
                         continue
                     visited.add(key)
-                    cell = self._cells.get(key)
+                    cell = cells_get(key)
                     if cell is None:
                         continue
                     for other in cell:

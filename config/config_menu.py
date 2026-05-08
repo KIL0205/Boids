@@ -287,7 +287,7 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     # Sardine
     _MenuItem("Sardine repro",   "sardine_eat_threshold",    1.0,   5.0,   0.0,   20.0),
     _MenuItem("Sardine starve",  "sardine_starvation_time",  1.0,  10.0,   0.0,  300.0),
-    _MenuItem("Sardine max",     "sardine_max_count",       50.0, 200.0,   0.0, 3000.0),
+    _MenuItem("Sardine max",     "sardine_max_count",       100.0, 200.0,   0.0, 5000.0),
     # Sailfish
     _MenuItem("Sailfish eat r",  "sailfish_eat_radius",      1.0,   5.0,  10.0,   80.0),
     _MenuItem("Sailfish repro",  "sailfish_eat_threshold",   1.0,   5.0,   0.0,   75.0),
@@ -307,6 +307,11 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     _ToggleItem("Orbit slots",    "debug_sailfish_orbit_slots_enabled"),
     _ToggleItem("State labels",   "debug_sailfish_state_labels_enabled"),
     _ToggleItem("Strike paths",   "debug_sailfish_strike_paths_enabled"),
+
+    # ── Performance ────────────────────────────────────────────────────
+    _GroupRow("PERFORMANCE"),
+    _ToggleItem("Frame timing HUD", "debug_frame_timing_enabled"),
+    _MenuItem("BB detect intv",  "baitball_detect_interval", 1.0, 1.0, 1.0, 10.0),
 
     _SaveRow(),
 ]

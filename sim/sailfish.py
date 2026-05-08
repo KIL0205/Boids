@@ -66,6 +66,7 @@ import math
 import random
 from typing import TYPE_CHECKING
 
+import numpy as np
 from transitions import Machine
 
 from sim.boid import Boid
@@ -931,7 +932,12 @@ class Sailfish(Boid):
         Biases selection toward the sailfish's preferred attack side when
         lateralization is enabled, so individual fish consistently approach
         from a stable flank rather than randomly.
+
+        Vectorised with numpy to avoid per-sardine math.sqrt calls.
         """
+        if not sardines:
+            return None
+
         cfg = self._config
         edge_floor = max(0.0, baitball.radius - cfg.sailfish_baitball_edge_band_width)
         lat_enabled  = cfg.sailfish_lateralization_enabled
@@ -952,32 +958,51 @@ class Sailfish(Boid):
                 lat_x = -fby * inv_fb   # perpendicular (CCW rotate)
                 lat_y =  fbx * inv_fb
 
-        best = None
-        best_score = -1e18
-        for s in sardines:
-            dx = float(s._gx) - baitball.cx
-            dy = float(s._gy) - baitball.cy
-            if dx > self._hw: dx -= self._W
-            elif dx < -self._hw: dx += self._W
-            if dy > self._hh: dy -= self._H
-            elif dy < -self._hh: dy += self._H
-            dist = math.sqrt(dx * dx + dy * dy)
-            if dist < edge_floor:
-                continue
+        # ── Vectorised scoring ─────────────────────────────────────────
+        # Gather sardine positions and velocities into numpy arrays.
+        n_s = len(sardines)
+        gxs  = np.empty(n_s, dtype=np.float64)
+        gys  = np.empty(n_s, dtype=np.float64)
+        gvxs = np.empty(n_s, dtype=np.float64)
+        gvys = np.empty(n_s, dtype=np.float64)
+        for i, s in enumerate(sardines):
+            gxs[i]  = s._gx
+            gys[i]  = s._gy
+            gvxs[i] = s._gvx
+            gvys[i] = s._gvy
 
-            # Base score: favor outer-edge and slower fish (more exposed).
-            speed = math.sqrt(float(s._gvx) * float(s._gvx) + float(s._gvy) * float(s._gvy))
-            score = dist - 0.08 * speed
+        cx, cy = baitball.cx, baitball.cy
+        W, H   = self._W, self._H
+        hw, hh = self._hw, self._hh
 
-            # Lateralization bias: add score for sardines on the preferred side.
-            if lat_enabled and lat_strength > 0.0 and lat_x != 0.0 and dist > 0.5:
-                side_dot = (dx * lat_x + dy * lat_y) / dist   # in [-1, 1]
-                score += self.attack_side * side_dot * lat_strength * baitball.radius
+        dx = gxs - cx
+        dy = gys - cy
+        # Toroidal correction.
+        dx = np.where(dx >  hw, dx - W, np.where(dx < -hw, dx + W, dx))
+        dy = np.where(dy >  hh, dy - H, np.where(dy < -hh, dy + H, dy))
+        dists = np.sqrt(dx * dx + dy * dy)
 
-            if score > best_score:
-                best_score = score
-                best = s
-        return best
+        # Filter by edge floor.
+        edge_mask = dists >= edge_floor
+        if not edge_mask.any():
+            return None
+
+        # Base score: outer-edge bias + slower = more exposed.
+        speeds  = np.sqrt(gvxs * gvxs + gvys * gvys)
+        scores  = dists - 0.08 * speeds
+
+        # Lateralization bias.
+        if lat_enabled and lat_strength > 0.0 and (lat_x != 0.0 or lat_y != 0.0):
+            safe_d = np.maximum(dists, 0.5)
+            side_dot = (dx * lat_x + dy * lat_y) / safe_d   # in [-1, 1]
+            scores += self.attack_side * side_dot * lat_strength * baitball.radius
+
+        # Mask out non-edge candidates and find best.
+        scores[~edge_mask] = -1e18
+        best_i = int(scores.argmax())
+        if scores[best_i] <= -1e17:
+            return None
+        return sardines[best_i]
 
     def _begin_baitball_strike(self, baitball: "_BaitballInfo", px: float, py: float) -> None:
         """Set strike line endpoints and arm the strike timer.
