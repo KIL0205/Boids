@@ -236,6 +236,32 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     _MenuItem("BB strike cd",    "sailfish_baitball_strike_cooldown_seconds", 0.2, 1.0, 0.0, 20.0),
     _MenuItem("BB exit dist",    "sailfish_baitball_strike_exit_distance", 2.0, 10.0, 5.0, 300.0),
 
+    # ── Sailfish: lateralization and orbit variation (anti-conga-line) ─
+    _ToggleItem("Lateralizatn",   "sailfish_lateralization_enabled"),
+    _MenuItem("Lat strength",    "sailfish_lateralization_strength",  0.05, 0.2, 0.0, 1.0),
+    _MenuItem("Orbit spd jit",   "sailfish_orbit_speed_jitter",       0.05, 0.2, 0.0, 1.0),
+    _MenuItem("Orbit rad jit",   "sailfish_orbit_radius_jitter",      0.02, 0.1, 0.0, 0.6),
+    _MenuItem("Orbit CCW frac",  "sailfish_orbit_ccw_fraction",       0.05, 0.1, 0.0, 1.0),
+
+    # ── Sailfish: proto-collaboration (turn-taking) ────────────────────
+    _MenuItem("Max BB strikes",  "sailfish_max_simultaneous_baitball_strikes", 1.0, 1.0, 1.0, 8.0),
+    _MenuItem("Indiv strike cd", "sailfish_individual_strike_cooldown_seconds", 0.5, 2.0, 0.0, 30.0),
+
+    # ── Sailfish: baitball anchor / drift damping ──────────────────────
+    _ToggleItem("BB anchor",     "sailfish_baitball_anchor_enabled"),
+    _MenuItem("Drift damping",   "sailfish_baitball_drift_damping_strength",  0.05, 0.2, 0.0, 3.0),
+    _MenuItem("Max inward pr",   "sailfish_baitball_max_inward_pressure",     0.02, 0.1, 0.0, 3.0),
+    _MenuItem("Inner falloff",   "sailfish_baitball_inner_pressure_falloff",  0.05, 0.1, 0.1, 1.0),
+
+    # ── Sailfish: attack pressure suppression ──────────────────────────
+    _MenuItem("Atk suppress",    "sailfish_attack_pressure_suppression",      0.02, 0.1, 0.0, 1.0),
+
+    # ── Sailfish: inter-sailfish spacing during orbit ──────────────────
+    _ToggleItem("SF spacing",    "sailfish_spacing_enabled"),
+    _MenuItem("Spacing radius",  "sailfish_spacing_radius",           2.0, 10.0,  20.0, 300.0),
+    _MenuItem("Spacing str",     "sailfish_spacing_strength",         0.1,  0.5,   0.0,   8.0),
+    _MenuItem("Follow penalty",  "sailfish_following_penalty_strength", 0.05, 0.2, 0.0,  4.0),
+
     # ── Sailfish: burst attack ─────────────────────────────────────────
     _GroupRow("SAILFISH — BURST"),
     _MenuItem("Burst trig r",    "sailfish_burst_trigger_radius",  5.0, 50.0, 10.0, 300.0),
@@ -269,6 +295,18 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     _MenuItem("Sailfish max",    "sailfish_max_count",       1.0,   5.0,   0.0,  200.0),
     _ToggleItem("SF starvation", "sailfish_starvation_enabled"),
     _ToggleItem("SF repro",      "sailfish_reproduction_enabled"),
+
+    # ── Debug visualization ────────────────────────────────────────────
+    _GroupRow("DEBUG VISUALIZATION"),
+    # Master toggle: when OFF every sub-option below is suppressed.
+    _ToggleItem("Debug overlays", "debug_baitballs_enabled"),
+    # Sub-options (only active when debug_baitballs_enabled is ON).
+    _ToggleItem("BB shading",     "debug_baitball_shading_enabled"),
+    _ToggleItem("BB labels",      "debug_baitball_labels_enabled"),
+    _ToggleItem("SF-BB links",    "debug_sailfish_baitball_links_enabled"),
+    _ToggleItem("Orbit slots",    "debug_sailfish_orbit_slots_enabled"),
+    _ToggleItem("State labels",   "debug_sailfish_state_labels_enabled"),
+    _ToggleItem("Strike paths",   "debug_sailfish_strike_paths_enabled"),
 
     _SaveRow(),
 ]

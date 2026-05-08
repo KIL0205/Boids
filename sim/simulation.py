@@ -367,12 +367,20 @@ class Simulation:
         self.debug_group_strike_cooldown = self._baitball_group_strike_cooldown_timer
 
         # Feed this frame's baitball snapshots to each sailfish.
+        # Count active baitball attackers from the previous frame so sailfish
+        # can gate new strikes via the proto-collaboration limit.
         sf_count = len(self.sailfish)
+        active_bb_strikes = sum(
+            1 for sf in self.sailfish
+            if sf._is_baitball_attacker
+            and sf.state in ("baitball_strike", "target_lock", "burst_attack")
+        )
         for sf in self.sailfish:
             sf.set_baitball_context(
                 self._baitballs,
                 sf_count,
                 self._baitball_group_strike_cooldown_timer,
+                active_bb_strikes,
             )
 
         # 2 — Phase 4A: populate sardine batch arrays and assign indices.
@@ -499,6 +507,15 @@ class Simulation:
                 # Decrement individual-target lock timer (counts down to 0, then lock releases).
                 if sf._target_lock_timer > 0.0:
                     sf._target_lock_timer = max(0.0, sf._target_lock_timer - dt)
+                # Per-fish baitball strike cooldown (proto-collaboration).
+                if sf._individual_strike_cooldown > 0.0:
+                    sf._individual_strike_cooldown = max(0.0, sf._individual_strike_cooldown - dt)
+                # Clear attacker flag when individual cooldown expires (or fish
+                # returns to non-attack state).
+                if sf._individual_strike_cooldown <= 0.0 and sf.state not in (
+                    "baitball_strike", "target_lock", "burst_attack"
+                ):
+                    sf._is_baitball_attacker = False
                 # Burst timers: count down burst; start cooldown + enter RECOVER
                 # when burst expires.
                 if sf._burst_timer > 0.0:
@@ -1186,6 +1203,123 @@ class Simulation:
             dy += H
         return dx, dy
 
+    def _merge_baitball_candidates(
+        self,
+        candidates: "list[_BaitballInfo]",
+        W: float,
+        H: float,
+        merge_dist_mult: float,
+        overlap_thresh: float,
+        max_final: int,
+        max_merge_radius: float,
+    ) -> "list[_BaitballInfo]":
+        """Greedy merge of overlapping per-cell baitball candidates.
+
+        The per-cell detector produces one candidate per occupied grid cell,
+        so a single large school generates many overlapping candidates.  This
+        pass collapses them into a small set of non-redundant baitballs.
+
+        Algorithm
+        ---------
+        Sort candidates by score (density × count) descending so the
+        strongest representation of each school is chosen as the "seed."
+        Each subsequent candidate either merges into the nearest already-
+        accepted baitball (if close enough) or starts a new one up to
+        *max_final*.
+
+        Merge condition — either test may trigger:
+            center_dist < merge_dist_mult × max(r_a, r_b)       [proximity]
+            center_dist < (r_a + r_b) × overlap_thresh          [overlap]
+
+        Large-school safeguard:
+            If an existing merged baitball's radius already exceeds
+            *max_merge_radius* (> 0), it is skipped as a merge target.
+            Candidates that would push a baitball beyond that size instead
+            start a new baitball (if the cap allows) or are discarded.
+            This prevents a map-scale school from collapsing into one giant
+            entity and keeps sailfish behavior localized to sub-clusters.
+
+        The merged baitball uses count-weighted center, an enclosing radius
+        computed from that center (exact, no sardine re-scan needed), and
+        density = combined_count / new_radius.
+        """
+        if not candidates:
+            return []
+
+        scored = sorted(candidates, key=lambda b: b.density * b.count, reverse=True)
+        final: list = []
+
+        for cand in scored:
+            best_i = -1
+            best_d2 = float("inf")
+
+            for i, ex in enumerate(final):
+                # Large-school safeguard: skip already-oversized baitballs.
+                if max_merge_radius > 0.0 and ex.radius >= max_merge_radius:
+                    continue
+
+                dx = cand.cx - ex.cx
+                dy = cand.cy - ex.cy
+                dx, dy = self._wrap_delta(dx, dy, W, H)
+                d2 = dx * dx + dy * dy
+
+                max_r = max(cand.radius, ex.radius)
+                sum_r = cand.radius + ex.radius
+                thresh = max(merge_dist_mult * max_r, overlap_thresh * sum_r)
+                if d2 <= thresh * thresh and d2 < best_d2:
+                    best_i = i
+                    best_d2 = d2
+
+            if best_i < 0:
+                # No close enough existing baitball — start a new one if cap
+                # not yet reached.  Once the cap is hit, remaining candidates
+                # are still checked for merging into existing baitballs (the
+                # loop above runs for all of them regardless).
+                if len(final) < max_final:
+                    final.append(cand)
+            else:
+                # Merge cand into final[best_i].
+                ex = final[best_i]
+                total = ex.count + cand.count
+                w_ex  = ex.count / total   # weight of existing
+                w_c   = cand.count / total  # weight of candidate
+
+                # Shortest-path toroidal delta from ex to cand.
+                dx = cand.cx - ex.cx
+                dy = cand.cy - ex.cy
+                dx, dy = self._wrap_delta(dx, dy, W, H)
+                d  = math.sqrt(best_d2)
+
+                # Count-weighted center (expressed as offset from ex, then
+                # wrapped back into world bounds).
+                new_cx = (ex.cx + dx * w_c) % W
+                new_cy = (ex.cy + dy * w_c) % H
+
+                # Enclosing radius: the farthest sardine reachable from
+                # new_cx/cy is bounded by (dist to constituent center) +
+                # (constituent radius).  Distances:
+                #   merged_center to ex:   d × w_c  (moves toward cand)
+                #   merged_center to cand: d × w_ex (moves away from ex)
+                dist_to_ex   = d * w_c
+                dist_to_cand = d * w_ex
+                new_radius = max(8.0,
+                                 dist_to_ex   + ex.radius,
+                                 dist_to_cand + cand.radius)
+                new_density = total / new_radius
+
+                final[best_i] = dataclasses.replace(
+                    ex,
+                    cx=new_cx,
+                    cy=new_cy,
+                    radius=new_radius,
+                    count=total,
+                    density=new_density,
+                )
+
+        # Assign stable bid indices to final baitballs in score order.
+        return [dataclasses.replace(b, bid=i) for i, b in enumerate(final)]
+
+
     def _detect_baitballs(self) -> list[_BaitballInfo]:
         """Approximate dense sardine clusters from sardine-grid neighborhoods.
 
@@ -1297,32 +1431,25 @@ class Simulation:
                 density=density,
             )
 
-            merged = False
-            for i, old in enumerate(candidates):
-                dx = info.cx - old.cx
-                dy = info.cy - old.cy
-                dx, dy = self._wrap_delta(dx, dy, W, H)
-                merge_r = min(info.radius, old.radius) * 0.75
-                if dx * dx + dy * dy <= merge_r * merge_r:
-                    new_score = info.density * info.count
-                    old_score = old.density * old.count
-                    if new_score > old_score:
-                        candidates[i] = info
-                    merged = True
-                    break
-            if not merged:
-                candidates.append(info)
+            # Collect every qualifying candidate; the post-detection merge
+            # pass (_merge_baitball_candidates) collapses same-school
+            # duplicates into stable merged baitballs.  The old inline merge
+            # used min(r1, r2)*0.75 which was too conservative and left many
+            # same-school candidates unmerged.
+            candidates.append(info)
 
         if not candidates:
             return []
 
-        # Keep a small, stable subset so sailfish selection stays cheap.
-        candidates.sort(key=lambda b: (b.density * b.count), reverse=True)
-        trimmed = candidates[:4]
-        return [
-            dataclasses.replace(b, bid=i)
-            for i, b in enumerate(trimmed)
-        ]
+        return self._merge_baitball_candidates(
+            candidates,
+            W,
+            H,
+            float(cfg.sailfish_baitball_merge_distance_multiplier),
+            float(cfg.sailfish_baitball_merge_overlap_threshold),
+            int(cfg.sailfish_baitball_max_final_baitballs),
+            float(cfg.sailfish_baitball_max_merge_radius),
+        )
 
     # ── Resize / config propagation ──────────────────────────────────
 
@@ -1441,6 +1568,13 @@ class Simulation:
             agent._orbit_patience_goal = 0.0
             agent._pending_group_strike_trigger = False
             agent._pending_group_strike_kind = ""
+            # Reset proto-collaboration state; per-fish random orbit vars are
+            # intentionally preserved across config changes.
+            agent._individual_strike_cooldown = 0.0
+            agent._is_baitball_attacker = False
+            agent._active_baitball_strikes = 0
+            agent._prev_baitball_cx = -1.0
+            agent._prev_baitball_cy = -1.0
         for agent in self.algae:
             agent._config   = new_config
             agent._sep_r2   = new_config.radius_algae_separation ** 2

@@ -289,6 +289,52 @@ class Sailfish(Boid):
         self.hunger_timer: float = 0.0
         self.age:          float = 0.0
 
+        # ── Lateralization (stable per-fish attack side preference) ───
+        # attack_side: +1 = prefer right flank of baitball, -1 = left.
+        # lateralization_bias: per-fish strength in [0.35, 1.0].
+        # Both persist for the lifetime of the fish.
+        self.attack_side:       int   = random.choice([-1, 1])
+        self.lateralization_bias: float = random.uniform(0.35, 1.0)
+
+        # ── Per-fish orbit variation (anti-conga-line) ─────────────────
+        # Each fish accumulates its own orbit angle at its own speed and
+        # direction so fish naturally spread out instead of forming a ring
+        # that rotates together.
+        self._orbit_angle_accum: float = random.uniform(0.0, 2.0 * math.pi)
+        _spd_j = config.sailfish_orbit_speed_jitter
+        self._orbit_speed_mult: float = max(
+            0.10, 1.0 + random.uniform(-_spd_j, _spd_j)
+        )
+        self._orbit_dir: int = (
+            -1 if random.random() < config.sailfish_orbit_ccw_fraction else 1
+        )
+        _rad_j = config.sailfish_orbit_radius_jitter
+        self._orbit_radius_mult: float = max(
+            0.60, min(1.50, 1.0 + random.uniform(-_rad_j, _rad_j))
+        )
+
+        # ── Proto-collaboration (turn-taking) ──────────────────────────
+        # _active_baitball_strikes: count injected by Simulation each frame.
+        # _individual_strike_cooldown: per-fish cooldown before next strike.
+        # _is_baitball_attacker: True while this fish is executing a baitball
+        #   attack (used by Simulation to count concurrent attackers).
+        self._active_baitball_strikes:      int   = 0
+        self._individual_strike_cooldown:   float = 0.0
+        self._is_baitball_attacker:         bool  = False
+
+        # Drift-damping: track previous baitball center to estimate velocity.
+        self._prev_baitball_cx: float = -1.0
+        self._prev_baitball_cy: float = -1.0
+
+        # ── Debug / visualization cache (written each frame by _apply_herding_pressure)
+        # These expose internal per-fish rendering data without requiring the
+        # renderer to re-derive it from first principles.
+        # debug_orbit_slot_x/y: world-space position of this fish's assigned
+        #   orbit slot (the target point the herding force steers toward).
+        #   Set to (-1, -1) when not orbiting or no baitball is active.
+        self.debug_orbit_slot_x: float = -1.0
+        self.debug_orbit_slot_y: float = -1.0
+
     # ------------------------------------------------------------------ #
     # External context                                                      #
     # ------------------------------------------------------------------ #
@@ -298,11 +344,13 @@ class Sailfish(Boid):
         baitballs: list["_BaitballInfo"],
         sailfish_count: int,
         group_strike_cooldown_timer: float,
+        active_baitball_strikes: int = 0,
     ) -> None:
         """Inject this frame's baitball snapshots from Simulation."""
         self._baitballs_frame = baitballs
         self._sailfish_count = sailfish_count
         self._group_strike_cooldown_timer = group_strike_cooldown_timer
+        self._active_baitball_strikes = active_baitball_strikes
 
     # ------------------------------------------------------------------ #
     # Speed/force override                                                 #
@@ -342,6 +390,8 @@ class Sailfish(Boid):
         dt  = self._dt
 
         self._is_herding = False
+        self.debug_orbit_slot_x = -1.0
+        self.debug_orbit_slot_y = -1.0
         baitball = self._select_active_baitball(dt)
 
         # ── 1. Validate individual target ─────────────────────────────
@@ -429,6 +479,7 @@ class Sailfish(Boid):
 
         if state == "orbit_baitball":
             if baitball is None or not has_sardines:
+                self._is_baitball_attacker = False
                 self.sm_orbit_to_track_school()
                 state = self.state
             else:
@@ -470,6 +521,8 @@ class Sailfish(Boid):
                             edge_target is not None
                             and self._group_strike_cooldown_timer <= 0.0
                             and self._baitball_strike_cooldown_timer <= 0.0
+                            and self._individual_strike_cooldown <= 0.0
+                            and self._active_baitball_strikes < cfg.sailfish_max_simultaneous_baitball_strikes
                         ):
                             chance = max(
                                 0.0,
@@ -825,6 +878,11 @@ class Sailfish(Boid):
             return False
         if self._orbit_timer < self._orbit_patience_goal:
             return False
+        # Proto-collaboration gates.
+        if self._individual_strike_cooldown > 0.0:
+            return False
+        if self._active_baitball_strikes >= cfg.sailfish_max_simultaneous_baitball_strikes:
+            return False
 
         # Convert a per-second chance into a frame-probability.
         chance = max(0.0, min(1.0, cfg.sailfish_baitball_center_strike_chance))
@@ -835,6 +893,12 @@ class Sailfish(Boid):
         """Notify Simulation that a group-level strike cooldown should be armed."""
         self._pending_group_strike_trigger = True
         self._pending_group_strike_kind = kind
+        # Start per-fish cooldown so this sailfish cannot immediately strike again.
+        self._individual_strike_cooldown = (
+            self._config.sailfish_individual_strike_cooldown_seconds
+        )
+        # Flag this fish as an active baitball attacker (read by Simulation).
+        self._is_baitball_attacker = True
 
     def _is_target_on_baitball_edge(
         self,
@@ -862,37 +926,67 @@ class Sailfish(Boid):
         sardines: list,
         baitball: "_BaitballInfo",
     ) -> "object | None":
-        """Pick a sardine near the baitball perimeter for deliberate edge strikes."""
+        """Pick a sardine near the baitball perimeter for deliberate edge strikes.
+
+        Biases selection toward the sailfish's preferred attack side when
+        lateralization is enabled, so individual fish consistently approach
+        from a stable flank rather than randomly.
+        """
         cfg = self._config
         edge_floor = max(0.0, baitball.radius - cfg.sailfish_baitball_edge_band_width)
+        lat_enabled  = cfg.sailfish_lateralization_enabled
+        lat_strength = cfg.sailfish_lateralization_strength * self.lateralization_bias
+
+        # Compute a lateral axis (perpendicular to fish→baitball vector) once.
+        lat_x = lat_y = 0.0
+        if lat_enabled and lat_strength > 0.0:
+            fbx = baitball.cx - float(self.position[0])
+            fby = baitball.cy - float(self.position[1])
+            if fbx > self._hw: fbx -= self._W
+            elif fbx < -self._hw: fbx += self._W
+            if fby > self._hh: fby -= self._H
+            elif fby < -self._hh: fby += self._H
+            fb_len = math.sqrt(fbx * fbx + fby * fby)
+            if fb_len > 1.0:
+                inv_fb = 1.0 / fb_len
+                lat_x = -fby * inv_fb   # perpendicular (CCW rotate)
+                lat_y =  fbx * inv_fb
 
         best = None
         best_score = -1e18
         for s in sardines:
             dx = float(s._gx) - baitball.cx
             dy = float(s._gy) - baitball.cy
-            if dx > self._hw:
-                dx -= self._W
-            elif dx < -self._hw:
-                dx += self._W
-            if dy > self._hh:
-                dy -= self._H
-            elif dy < -self._hh:
-                dy += self._H
+            if dx > self._hw: dx -= self._W
+            elif dx < -self._hw: dx += self._W
+            if dy > self._hh: dy -= self._H
+            elif dy < -self._hh: dy += self._H
             dist = math.sqrt(dx * dx + dy * dy)
             if dist < edge_floor:
                 continue
 
-            # Favor outer-edge and slower fish (more exposed).
+            # Base score: favor outer-edge and slower fish (more exposed).
             speed = math.sqrt(float(s._gvx) * float(s._gvx) + float(s._gvy) * float(s._gvy))
             score = dist - 0.08 * speed
+
+            # Lateralization bias: add score for sardines on the preferred side.
+            if lat_enabled and lat_strength > 0.0 and lat_x != 0.0 and dist > 0.5:
+                side_dot = (dx * lat_x + dy * lat_y) / dist   # in [-1, 1]
+                score += self.attack_side * side_dot * lat_strength * baitball.radius
+
             if score > best_score:
                 best_score = score
                 best = s
         return best
 
     def _begin_baitball_strike(self, baitball: "_BaitballInfo", px: float, py: float) -> None:
-        """Set strike line endpoints and arm the strike timer."""
+        """Set strike line endpoints and arm the strike timer.
+
+        The exit point is computed as a straight line from the fish through
+        the baitball center and out the other side.  When lateralization is
+        enabled the corridor is shifted slightly to the fish's preferred flank
+        so each fish makes a slightly different angled pass.
+        """
         cfg = self._config
         dx = baitball.cx - px
         dy = baitball.cy - py
@@ -921,9 +1015,28 @@ class Sailfish(Boid):
             ux = dx * inv
             uy = dy * inv
 
+        # Lateralized exit: shift the exit anchor perpendicular to approach.
+        # Each fish gets a unique corridor through the baitball based on its
+        # stable attack_side preference.
+        if cfg.sailfish_lateralization_enabled and self.lateralization_bias > 0.05:
+            lat_offset = (
+                self.attack_side
+                * self.lateralization_bias
+                * baitball.radius
+                * 0.28
+            )
+            # Perpendicular to approach direction.
+            perp_x = -uy
+            perp_y =  ux
+            exit_cx = baitball.cx + perp_x * lat_offset
+            exit_cy = baitball.cy + perp_y * lat_offset
+        else:
+            exit_cx = baitball.cx
+            exit_cy = baitball.cy
+
         strike_len = baitball.radius + cfg.sailfish_baitball_strike_exit_distance
-        self._baitball_strike_exit_x = (baitball.cx + ux * strike_len) % self._W
-        self._baitball_strike_exit_y = (baitball.cy + uy * strike_len) % self._H
+        self._baitball_strike_exit_x = (exit_cx + ux * strike_len) % self._W
+        self._baitball_strike_exit_y = (exit_cy + uy * strike_len) % self._H
         self._baitball_strike_timer = cfg.sailfish_baitball_strike_duration_seconds
         self._target_sardine = None
         self._target_lock_timer = 0.0
@@ -934,7 +1047,24 @@ class Sailfish(Boid):
         px: float,
         py: float,
     ) -> None:
-        """Push sailfish onto distributed pressure slots around dense schools."""
+        """Push sailfish onto distributed pressure slots around dense schools.
+
+        Anti-conga-line changes vs original implementation
+        --------------------------------------------------
+        * Each sailfish accumulates its own orbit angle at its own speed and
+          direction (``_orbit_speed_mult``, ``_orbit_dir``), so fish naturally
+          drift apart around the perimeter instead of rotating together.
+        * Per-fish radius jitter (``_orbit_radius_mult``) adds loose radial
+          spread so the ring is not perfectly uniform.
+        * Inward pressure is capped (``sailfish_baitball_max_inward_pressure``)
+          and tapers to zero when the fish is inside the orbit ring (falloff),
+          preventing fish from pushing the baitball across the screen.
+        * Drift damping opposes the detected baitball movement direction.
+        * Attacking sailfish have their herding contribution scaled to near-zero
+          (``sailfish_attack_pressure_suppression``) so they don't simultaneously
+          herd AND strike.
+        * Inter-sailfish spacing force breaks the conga-line following pattern.
+        """
         cfg = self._config
         if baitball is None or not cfg.sailfish_herding_enabled:
             return
@@ -946,60 +1076,177 @@ class Sailfish(Boid):
         self._is_herding = True
         self._orbiting_baitball = True
 
+        dt = self._dt
+
+        # ── Attack pressure suppression ────────────────────────────────
+        # Sailfish in a baitball attack apply near-zero herding so they don't
+        # simultaneously push inward AND sprint at a target.
+        if self._is_baitball_attacker and self.state in (
+            "baitball_strike", "target_lock", "burst_attack"
+        ):
+            suppress = cfg.sailfish_attack_pressure_suppression
+        else:
+            suppress = 1.0
+        if suppress <= 0.0:
+            return
+
+        # ── Per-fish orbit angle (anti-conga-line) ─────────────────────
+        self._orbit_angle_accum += (
+            cfg.sailfish_baitball_orbit_rotation_speed
+            * self._orbit_speed_mult
+            * float(self._orbit_dir)
+            * dt
+        )
+        # Keep in [-100, 100] range to prevent float precision drift.
+        if self._orbit_angle_accum > 100.0 or self._orbit_angle_accum < -100.0:
+            self._orbit_angle_accum = math.fmod(self._orbit_angle_accum, 2.0 * math.pi)
+
         slot_count = max(cfg.sailfish_herding_min_sailfish, self._sailfish_count)
         slot = (self._sid + baitball.bid * 7) % slot_count
         base_theta = (2.0 * math.pi * slot) / slot_count
-        jitter = math.sin(self.age * 0.9 + self._sid * 1.73) * cfg.sailfish_baitball_slot_jitter
-        theta = base_theta + self.age * cfg.sailfish_baitball_orbit_rotation_speed + jitter
+        jitter = math.sin(self._sid * 1.73) * cfg.sailfish_baitball_slot_jitter
+        theta = base_theta + self._orbit_angle_accum + jitter
 
-        pressure_r = baitball.radius * cfg.sailfish_baitball_orbit_radius_multiplier
+        # Per-fish orbit radius variation.
+        pressure_r = (
+            baitball.radius
+            * cfg.sailfish_baitball_orbit_radius_multiplier
+            * self._orbit_radius_mult
+        )
         tx = (baitball.cx + math.cos(theta) * pressure_r) % self._W
         ty = (baitball.cy + math.sin(theta) * pressure_r) % self._H
 
+        # Cache slot position for debug rendering.
+        self.debug_orbit_slot_x = tx
+        self.debug_orbit_slot_y = ty
+
         dxp = tx - px
         dyp = ty - py
-        if dxp > self._hw:
-            dxp -= self._W
-        elif dxp < -self._hw:
-            dxp += self._W
-        if dyp > self._hh:
-            dyp -= self._H
-        elif dyp < -self._hh:
-            dyp += self._H
+        if dxp > self._hw: dxp -= self._W
+        elif dxp < -self._hw: dxp += self._W
+        if dyp > self._hh: dyp -= self._H
+        elif dyp < -self._hh: dyp += self._H
 
-        # Slot-hold force keeps each sailfish at a stable orbit assignment.
-        self._steer_apply_xy(dxp, dyp, cfg.sailfish_herding_pressure_strength)
+        # Slot-hold force keeps each sailfish at a stable orbit position.
+        self._steer_apply_xy(dxp, dyp, cfg.sailfish_herding_pressure_strength * suppress)
 
-        # Tangential force makes sailfish circle baitball perimeter.
+        # ── Vector from fish to baitball center ───────────────────────
         dx_center = baitball.cx - px
         dy_center = baitball.cy - py
-        if dx_center > self._hw:
-            dx_center -= self._W
-        elif dx_center < -self._hw:
-            dx_center += self._W
-        if dy_center > self._hh:
-            dy_center -= self._H
-        elif dy_center < -self._hh:
-            dy_center += self._H
+        if dx_center > self._hw: dx_center -= self._W
+        elif dx_center < -self._hw: dx_center += self._W
+        if dy_center > self._hh: dy_center -= self._H
+        elif dy_center < -self._hh: dy_center += self._H
         d2_center = dx_center * dx_center + dy_center * dy_center
-        if d2_center > 1.0:
-            inv = 1.0 / math.sqrt(d2_center)
+        dist_center = math.sqrt(d2_center) if d2_center > 1.0 else 0.0
+
+        # Tangential and inward forces require a valid center vector.
+        tangent_x = tangent_y = 0.0
+        if dist_center > 1.0:
+            inv = 1.0 / dist_center
             nx = dx_center * inv
             ny = dy_center * inv
-            tangent_x = -ny
-            tangent_y = nx
+
+            # ── Tangential force (direction set by per-fish orbit direction) ─
+            # CW (+1): tangent = (+ny, -nx);  CCW (-1): tangent = (-ny, +nx)
+            if self._orbit_dir >= 0:
+                tangent_x = -ny
+                tangent_y =  nx
+            else:
+                tangent_x =  ny
+                tangent_y = -nx
             self._steer_apply_xy(
                 tangent_x,
                 tangent_y,
-                cfg.sailfish_baitball_orbit_tangent_strength,
+                cfg.sailfish_baitball_orbit_tangent_strength * suppress,
             )
 
-        # Mild inward pressure from the slot keeps compression believable.
-        self._steer_apply_xy(
-            dx_center,
-            dy_center,
-            cfg.sailfish_baitball_inward_pressure_strength,
-        )
+            # ── Inward pressure with falloff + cap ──────────────────────
+            # sailfish_baitball_inward_pressure_strength is the nominal base
+            # value (tunable via the config menu "Orbit inward" control).
+            # sailfish_baitball_max_inward_pressure is the absolute safety
+            # ceiling — the effective force never exceeds it even if strength
+            # is set higher.
+            inward_str = min(
+                cfg.sailfish_baitball_inward_pressure_strength,
+                cfg.sailfish_baitball_max_inward_pressure,
+            )
+            falloff_r  = pressure_r * cfg.sailfish_baitball_inner_pressure_falloff
+            if falloff_r > 0.0 and dist_center < falloff_r:
+                # Linear taper: zero at baitball center, full at falloff_r.
+                inward_str *= dist_center / falloff_r
+            if inward_str > 1e-6:
+                self._steer_apply_xy(
+                    dx_center, dy_center,
+                    inward_str * suppress,
+                )
+
+        # ── Drift damping: estimate baitball velocity from frame-to-frame ─
+        # We track the baitball center per-fish each frame.  If the baitball
+        # has moved, we push against the drift to anchor it in place.
+        if cfg.sailfish_baitball_anchor_enabled and cfg.sailfish_baitball_drift_damping_strength > 0.0:
+            if self._prev_baitball_cx >= 0.0 and dt > 0.0:
+                ddx = baitball.cx - self._prev_baitball_cx
+                ddy = baitball.cy - self._prev_baitball_cy
+                # Toroidal correction for the delta.
+                if ddx > self._hw: ddx -= self._W
+                elif ddx < -self._hw: ddx += self._W
+                if ddy > self._hh: ddy -= self._H
+                elif ddy < -self._hh: ddy += self._H
+                drift_spd2 = (ddx * ddx + ddy * ddy) / (dt * dt)
+                # Only dampen if drift is substantial (> 3 px/s) to avoid noise.
+                if drift_spd2 > 9.0:
+                    drift_vx = ddx / dt
+                    drift_vy = ddy / dt
+                    self._steer_apply_xy(
+                        -drift_vx, -drift_vy,
+                        cfg.sailfish_baitball_drift_damping_strength * suppress,
+                    )
+            self._prev_baitball_cx = baitball.cx
+            self._prev_baitball_cy = baitball.cy
+
+        # ── Inter-sailfish spacing during orbit (anti-conga-line) ──────
+        # Push nearby sailfish apart tangentially to prevent them from
+        # following directly behind one another in a line.
+        if (
+            cfg.sailfish_spacing_enabled
+            and self._sailfish_grid is not None
+            and suppress > 0.0
+        ):
+            sp_r  = cfg.sailfish_spacing_radius
+            sp_r2 = sp_r * sp_r
+            sp_w  = cfg.sailfish_spacing_strength * suppress
+            fol_w = cfg.sailfish_following_penalty_strength * suppress
+            sf_nb = self._sailfish_grid.query(self, sp_r)
+            if sf_nb:
+                ssx = ssy = 0.0
+                for other in sf_nb:
+                    ddx = px - other._gx
+                    ddy = py - other._gy
+                    if ddx > self._hw: ddx -= self._W
+                    elif ddx < -self._hw: ddx += self._W
+                    if ddy > self._hh: ddy -= self._H
+                    elif ddy < -self._hh: ddy += self._H
+                    dd2 = ddx * ddx + ddy * ddy
+                    if dd2 <= _EPS2 or dd2 > sp_r2:
+                        continue
+                    inv_d = 1.0 / math.sqrt(dd2)
+                    ssx += ddx * inv_d
+                    ssy += ddy * inv_d
+                    # Following penalty: if other is ahead in the orbit direction,
+                    # apply a small counter-tangential push to spread fish out.
+                    if fol_w > 0.0 and tangent_x != 0.0:
+                        to_other_x = -ddx
+                        to_other_y = -ddy
+                        dot = to_other_x * tangent_x + to_other_y * tangent_y
+                        if dot > 0.0:
+                            falloff = 1.0 - math.sqrt(dd2) / sp_r
+                            self._steer_apply_xy(
+                                -tangent_x, -tangent_y,
+                                fol_w * falloff,
+                            )
+                if ssx != 0.0 or ssy != 0.0:
+                    self._steer_apply_xy(ssx, ssy, sp_w)
 
     def _apply_school_pressure(self, com_x: float, com_y: float) -> None:
         """Add a tangential orbit force around the school COM.

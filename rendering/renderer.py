@@ -65,6 +65,8 @@ import numpy as np
 import pyglet
 import pyglet.gl as gl
 
+from rendering.debug_overlay import BaitballDebugOverlay
+
 if TYPE_CHECKING:
     from sim.boid import Boid
     from config.config import SimConfig
@@ -569,6 +571,10 @@ class Renderer:
         # Created lazily on the first active frame; deleted on reset().
         self._mouse_indicator: pyglet.shapes.Circle | None = None
 
+        # Debug baitball / herding overlay — stateless, drawn immediately each
+        # frame when the relevant SimConfig toggles are enabled.
+        self._debug_overlay = BaitballDebugOverlay()
+
     # ── One-time setup ────────────────────────────────────────────────
 
     def reset(self, sardines: list["Boid"], sailfish: list["Boid"] | None = None, algae: list["Boid"] | None = None) -> None:
@@ -842,6 +848,9 @@ class Renderer:
                 self._mouse_indicator.y      = ms.y
                 self._mouse_indicator.radius = ms.radius
             self._mouse_indicator.draw()
+
+        # ── Baitball / herding debug overlay ─────────────────────────────
+        self._debug_overlay.draw(simulation, cfg)
 
         if self._hud is not None:
             self._hud.update(simulation, update_ms, self._last_render_ms)
