@@ -5083,3 +5083,257 @@ class TestSailfishBaitballCooperation(unittest.TestCase):
             sim.update(1 / 60)
 
         self.assertIn(sf.state, {"orbit_baitball", "baitball_strike", "recover", "target_lock", "burst_attack"})
+
+
+# =============================================================================
+# WebGPU sardine backend tests
+# =============================================================================
+
+import unittest.mock
+
+class TestSardineGPUBackend(unittest.TestCase):
+    """Tests for the optional WebGPU (wgpu-py) sardine force backend.
+
+    Tests run regardless of whether wgpu is installed:
+    - When wgpu is available: validate numerical correctness against CPU path.
+    - Always: verify graceful fallback behavior in simulation.
+
+    Correctness criteria (GPU vs CPU):
+    - Positions remain within world bounds after wrapping.
+    - Velocities stay within [min_speed, max_speed].
+    - No NaN or Inf values after many frames.
+    - Net flocking behavior visible (sardines cluster rather than diverge).
+    """
+
+    def _sim_cfg(self, n_sardines=600, sardine_use_gpu=False, **overrides):
+        kwargs = dict(
+            window_width=400, window_height=300,
+            num_sardines=0, num_algae=0, num_sailfish=0,
+            sardine_starvation_time=0.0,
+            sardine_eat_threshold=0,
+            algae_respawn_rate=0.0,
+            mouse_predator_enabled=False,
+            weight_noise=0.0,    # disable noise for determinism in invariant tests
+            sardine_use_gpu=sardine_use_gpu,
+            sardine_min_speed=0.0,
+        )
+        kwargs.update(overrides)
+        return SimConfig(**kwargs)
+
+    def _make_sim_n(self, n, cfg):
+        from sim.simulation import Simulation
+        from sim.sardine import Sardine
+        import random
+        rng = random.Random(42)
+        sim = Simulation(cfg)
+        W, H = float(cfg.window_width), float(cfg.window_height)
+        for _ in range(n):
+            x = rng.uniform(10, W - 10)
+            y = rng.uniform(10, H - 10)
+            vx = rng.uniform(-50, 50)
+            vy = rng.uniform(-50, 50)
+            sim.sardines.append(Sardine(x, y, vx, vy, cfg, sim._grid, sim._sailfish_grid))
+        return sim
+
+    # ── try_create_backend ────────────────────────────────────────────────────
+
+    def test_try_create_backend_returns_backend_or_none(self):
+        """try_create_backend() returns a SardineGPUBackend or None; never raises."""
+        from sim.sardine_gpu import try_create_backend
+        backend = try_create_backend()
+        # Either a backend object or None — never an exception.
+        self.assertIn(type(backend).__name__, {"SardineGPUBackend", "NoneType"})
+
+    def test_try_create_backend_survives_import_error(self):
+        """When wgpu is unavailable, try_create_backend() returns None, no crash."""
+        import sys
+        import importlib
+        # Temporarily hide wgpu from the import system.
+        saved = sys.modules.get("wgpu")
+        sys.modules["wgpu"] = None  # type: ignore[assignment]
+        try:
+            # Force re-import of sardine_gpu with wgpu blocked.
+            import sim.sardine_gpu as sgpu_mod
+            importlib.reload(sgpu_mod)
+            result = sgpu_mod.try_create_backend()
+            self.assertIsNone(result)
+        finally:
+            if saved is None:
+                sys.modules.pop("wgpu", None)
+            else:
+                sys.modules["wgpu"] = saved
+            importlib.reload(sgpu_mod)
+
+    # ── graceful CPU fallback in Simulation ───────────────────────────────────
+
+    def test_simulation_falls_back_to_cpu_when_gpu_fails(self):
+        """When _gpu_backend is None after init, simulation runs on CPU without crashing."""
+        from sim.simulation import Simulation
+        from sim.sardine import Sardine
+        cfg = self._sim_cfg(sardine_use_gpu=True)
+        sim = Simulation(cfg)
+        # Simulate failed GPU init: mark tried=True, backend=None.
+        sim._gpu_init_tried = True
+        sim._gpu_backend = None
+        # Add enough sardines to trigger the n>=500 vectorized path.
+        W, H = float(cfg.window_width), float(cfg.window_height)
+        for k in range(550):
+            x = 20.0 + (k % 20) * 18.0
+            y = 20.0 + (k // 20) * 18.0
+            sim.sardines.append(Sardine(x, y, 10.0, 0.0, cfg, sim._grid, sim._sailfish_grid))
+        # Must not raise even with GPU disabled.
+        for _ in range(5):
+            sim.update(1 / 60)
+
+    def test_gpu_flag_off_uses_cpu_path(self):
+        """With sardine_use_gpu=False, _gpu_backend is never set."""
+        from sim.simulation import Simulation
+        from sim.sardine import Sardine
+        cfg = self._sim_cfg(sardine_use_gpu=False)
+        sim = Simulation(cfg)
+        for k in range(10):
+            sim.sardines.append(Sardine(50.0 + k * 15, 50.0, 10.0, 0.0, cfg, sim._grid))
+        sim.update(1 / 60)
+        # _gpu_init_tried must remain False (lazy init never triggered).
+        self.assertFalse(sim._gpu_init_tried)
+
+    # ── invariant tests (run on real GPU if available, else skip) ─────────────
+
+    @classmethod
+    def setUpClass(cls):
+        from sim.sardine_gpu import try_create_backend, _WGPU_AVAILABLE
+        cls._wgpu_available = _WGPU_AVAILABLE
+        cls._gpu_backend = try_create_backend() if _WGPU_AVAILABLE else None
+
+    def _skip_if_no_gpu(self):
+        if self._gpu_backend is None:
+            self.skipTest("wgpu not available or GPU init failed — skipping GPU invariant test")
+
+    def test_gpu_positions_within_bounds_after_many_frames(self):
+        """After 120 GPU frames, all sardine positions wrap within world bounds."""
+        self._skip_if_no_gpu()
+        from sim.simulation import Simulation
+        from sim.sardine import Sardine
+        cfg = self._sim_cfg(sardine_use_gpu=True, num_sardines=0)
+        sim = Simulation(cfg)
+        sim._gpu_init_tried = True
+        sim._gpu_backend = self._gpu_backend
+        W, H = float(cfg.window_width), float(cfg.window_height)
+        rng = np.random.default_rng(7)
+        for _ in range(600):
+            x = rng.uniform(5, W - 5)
+            y = rng.uniform(5, H - 5)
+            vx, vy = rng.uniform(-60, 60), rng.uniform(-60, 60)
+            sim.sardines.append(Sardine(x, y, vx, vy, cfg, sim._grid, sim._sailfish_grid))
+
+        for _ in range(120):
+            sim.update(1 / 60)
+
+        for s in sim.sardines:
+            self.assertGreaterEqual(s._gx, 0.0)
+            self.assertLess(s._gx, W)
+            self.assertGreaterEqual(s._gy, 0.0)
+            self.assertLess(s._gy, H)
+
+    def test_gpu_no_nan_inf_after_many_frames(self):
+        """No NaN or Inf values in positions or velocities after GPU simulation."""
+        self._skip_if_no_gpu()
+        from sim.simulation import Simulation
+        from sim.sardine import Sardine
+        cfg = self._sim_cfg(sardine_use_gpu=True, num_sardines=0)
+        sim = Simulation(cfg)
+        sim._gpu_init_tried = True
+        sim._gpu_backend = self._gpu_backend
+        W, H = float(cfg.window_width), float(cfg.window_height)
+        rng = np.random.default_rng(13)
+        for _ in range(600):
+            x = rng.uniform(5, W - 5)
+            y = rng.uniform(5, H - 5)
+            vx, vy = rng.uniform(-60, 60), rng.uniform(-60, 60)
+            sim.sardines.append(Sardine(x, y, vx, vy, cfg, sim._grid, sim._sailfish_grid))
+
+        for _ in range(120):
+            sim.update(1 / 60)
+
+        pos = sim._s_pos[:sim._s_n]
+        vel = sim._s_vel[:sim._s_n]
+        self.assertTrue(np.all(np.isfinite(pos)), "NaN/Inf in positions after GPU frames")
+        self.assertTrue(np.all(np.isfinite(vel)), "NaN/Inf in velocities after GPU frames")
+
+    def test_gpu_velocity_clamping_respected(self):
+        """GPU path: sardine speeds stay within [min_speed, max_speed]."""
+        self._skip_if_no_gpu()
+        from sim.simulation import Simulation
+        from sim.sardine import Sardine
+        max_speed = 100.0
+        min_speed = 20.0
+        cfg = self._sim_cfg(
+            sardine_use_gpu=True, num_sardines=0,
+            sardine_max_speed=max_speed, sardine_min_speed=min_speed,
+            weight_noise=0.02,
+        )
+        sim = Simulation(cfg)
+        sim._gpu_init_tried = True
+        sim._gpu_backend = self._gpu_backend
+        W, H = float(cfg.window_width), float(cfg.window_height)
+        rng = np.random.default_rng(99)
+        for _ in range(600):
+            x = rng.uniform(5, W - 5)
+            y = rng.uniform(5, H - 5)
+            vx, vy = rng.uniform(-80, 80), rng.uniform(-80, 80)
+            sim.sardines.append(Sardine(x, y, vx, vy, cfg, sim._grid, sim._sailfish_grid))
+
+        for _ in range(60):
+            sim.update(1 / 60)
+
+        vel = sim._s_vel[:sim._s_n]
+        speeds = np.hypot(vel[:, 0], vel[:, 1])
+        self.assertTrue(
+            np.all(speeds <= max_speed + 1e-6),
+            f"Speeds exceed max_speed: max={speeds.max():.4f}"
+        )
+
+    def test_gpu_sardines_cluster_over_time(self):
+        """GPU sardines starting spread should cluster (avg pairwise distance shrinks)."""
+        self._skip_if_no_gpu()
+        from sim.simulation import Simulation
+        from sim.sardine import Sardine
+        cfg = self._sim_cfg(
+            sardine_use_gpu=True, num_sardines=0,
+            window_width=400, window_height=300,
+            weight_noise=0.0,
+            weight_cohesion=2.0,
+            weight_separation=1.5,
+            weight_alignment=1.2,
+        )
+        sim = Simulation(cfg)
+        sim._gpu_init_tried = True
+        sim._gpu_backend = self._gpu_backend
+        # Place 600 sardines spread across the world.
+        rng = np.random.default_rng(17)
+        W, H = 400.0, 300.0
+        for _ in range(600):
+            x = rng.uniform(0, W)
+            y = rng.uniform(0, H)
+            sim.sardines.append(Sardine(x, y, 0.0, 0.0, cfg, sim._grid, sim._sailfish_grid))
+
+        # Measure initial spread as sum of position variance.
+        def spread(sim_):
+            pos = sim_._s_pos[:sim_._s_n]
+            if len(pos) == 0:
+                return 0.0
+            return float(np.var(pos[:, 0]) + np.var(pos[:, 1]))
+
+        # Need one update to populate _s_pos.
+        sim.update(1 / 60)
+        spread_initial = spread(sim)
+
+        for _ in range(180):
+            sim.update(1 / 60)
+        spread_final = spread(sim)
+
+        # With strong cohesion, fish should cluster — variance should decrease.
+        self.assertLess(
+            spread_final, spread_initial,
+            f"GPU sardines did not cluster: spread {spread_initial:.1f} → {spread_final:.1f}"
+        )

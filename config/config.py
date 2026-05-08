@@ -1299,6 +1299,16 @@ class SimConfig:
     # Toggle in DEBUG VISUALIZATION config section or via boids_overrides.json.
     debug_frame_timing_enabled: bool = False
 
+    # Whether to use the WebGPU (wgpu-py) compute backend for sardine flocking
+    # forces (separation, alignment, cohesion, flee).  When True the GPU runs
+    # pass 1 / 1b / 2 of _batch_compute_sardine_forces in a WGSL compute shader
+    # and the CPU handles only pass 3 (noise) and integration.
+    # Requires wgpu-py: pip install wgpu.
+    # Falls back to the CPU path silently if wgpu is unavailable or device init
+    # fails — no crash, just a logged warning.
+    # Only active for n >= 500 sardines (small-population fast path stays on CPU).
+    sardine_use_gpu: bool = False
+
     # How many frames to stagger baitball detection across.
     # Detection runs on frame N % baitball_detect_interval == 0; between
     # detection frames the cached result is reused.

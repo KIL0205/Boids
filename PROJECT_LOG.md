@@ -17,6 +17,40 @@ Use supporting files for detail:
 
 ## Log Maintenance (Chronological)
 
+- 2026-05-08: WebGPU sardine compute backend (wgpu-py / WGSL / Metal).  
+  Why: CPU sardine force pass still dominated all high-population scenarios (14–25 ms/frame). WebGPU compute shaders on the Apple M5 Metal backend proved 5–9× faster than the Python numpy cell-bucket loop for sardine flocking forces, reducing worst_case from 40 ms to 16.5 ms.  
+  What changed:
+  - [sim/sardine_gpu.py](sim/sardine_gpu.py): New file. `SardineGPUBackend` builds a WGSL compute shader that computes flee + separation + alignment + cohesion for all sardines in parallel. Each invocation handles one sardine; passes 1 / 1b / 2 of `_batch_compute_sardine_forces` are replaced. CPU sorts sardines into a contiguous spatial hash (argsort + bincount + cumsum), uploads float32 buffers, dispatches the shader, reads back float32 results, scatters to original-index float64 output. Pass 3 (noise) stays on CPU. Graceful fallback: `try_create_backend()` returns `None` on wgpu import error or device init failure. Requires `pip install wgpu` (wgpu-py 0.31+).
+  - [sim/simulation.py](sim/simulation.py): `__init__` adds `_gpu_backend` and `_gpu_init_tried` fields (lazy init). `_batch_compute_sardine_forces` checks `cfg.sardine_use_gpu` before the CPU cell-bucket loop; if GPU fails mid-frame it disables itself, resets accumulator, and falls through to CPU. `apply_config` allows re-init when GPU is toggled on via config menu.
+  - [config/config.py](config/config.py): New field `sardine_use_gpu: bool = False`.
+  - [config/config_menu.py](config/config_menu.py): New `_ToggleItem("GPU sardine forces", "sardine_use_gpu")` in PERFORMANCE section.
+  - [boids_overrides.json](boids_overrides.json): Added `sardine_use_gpu: false` (default off).
+  - [tests/bench.py](tests/bench.py): Two GPU scenarios (`gpu_baseline`, `gpu_worst_case`) added to `GPU_SCENARIOS`. `--compare-gpu` flag runs CPU vs GPU head-to-head comparison with delta table and speedup ratio. `run_gpu_comparison()` helper function.
+  - [tests/tests.py](tests/tests.py): New `TestSardineGPUBackend` class (8 tests): backend availability, import-error fallback, CPU fallback when GPU fails, positions within bounds, no NaN/Inf, velocity clamping, sardines cluster over time. All 8 pass (invariant tests skip gracefully when wgpu unavailable).
+
+  **CPU vs WebGPU comparison (200 frames, 60 warmup, Apple M5, Metal backend):**
+
+  | Scenario | CPU avg | GPU avg | Delta | GPU sardine ms |
+  |---|---|---|---|---|
+  | baseline (1500 sardines) | 16.39 ms | 3.24 ms | **−13.15 ms (5.1×)** | 1.61 ms |
+  | worst_case (2500s + ecology) | 38.01 ms | 16.55 ms | **−21.46 ms (2.3×)** | 1.73 ms |
+
+  worst_case GPU breakdown: sardine 1.73 ms, sailfish 1.48 ms, baitball 7.21 ms, algae 0.64 ms.
+  Baitball detection and sailfish FSM remain on CPU (no change).
+
+  **How to enable GPU:** `Tab → PERFORMANCE → GPU sardine forces → ON`, or set `sardine_use_gpu: true` in `boids_overrides.json`.
+
+  **Platform notes:**
+  - macOS (Apple Silicon): Metal backend, tested on M5. No installation issues.
+  - Linux: Vulkan or Metal via wgpu-native (untested here; should work).
+  - Windows: DX12 or Vulkan via wgpu-native (untested here; should work).
+  - wgpu-py uses wgpu-native (a Rust WebGPU implementation), not a browser; no browser required.
+  - Fallback to CPU is automatic on unsupported hardware or missing wgpu.
+
+  **Remaining bottlenecks with GPU enabled:** baitball detection (7.2 ms in worst_case) is the next largest cost. Moving it to GPU would require a significant WGSL rewrite of the connected-component merge logic.
+
+  Verification: 281/281 tests pass.
+
 - 2026-04 (early): Log hygiene pass. Corrected test counts to 268 tests across 23 suites, removed stale TODOs, and moved old optimization archaeology out of this file to [memory/ARCHIVE.md](memory/ARCHIVE.md).  
   Why: keep the active log readable.  
   Where: [PROJECT_LOG.md](PROJECT_LOG.md), [memory/ARCHIVE.md](memory/ARCHIVE.md).

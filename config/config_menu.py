@@ -312,6 +312,7 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     _GroupRow("PERFORMANCE"),
     _ToggleItem("Frame timing HUD", "debug_frame_timing_enabled"),
     _MenuItem("BB detect intv",  "baitball_detect_interval", 1.0, 1.0, 1.0, 10.0),
+    _ToggleItem("GPU sardine forces", "sardine_use_gpu"),
 
     _SaveRow(),
 ]

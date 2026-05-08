@@ -200,6 +200,14 @@ class Simulation:
         self._sf_owner_buf: np.ndarray = np.empty(64, dtype=np.int32)
         self._bb_neigh_buf: np.ndarray = np.empty(64, dtype=np.int32)
 
+        # ── Optional WebGPU sardine force backend ─────────────────────
+        # Initialized lazily on first use when sardine_use_gpu is True.
+        # _gpu_init_tried prevents re-attempting after a failed init.
+        # On success: _gpu_backend is a SardineGPUBackend instance.
+        # On failure or wgpu missing: _gpu_backend stays None, CPU used.
+        self._gpu_backend = None
+        self._gpu_init_tried: bool = False
+
         # ── Population history (for 'd'-key graph overlay) ────────────
         # Sampled at ~1 Hz of simulated time; deque cap prevents unbounded
         # growth.  Each entry is (sim_time, n_sardines, n_sailfish, n_algae).
@@ -889,6 +897,52 @@ class Simulation:
             return
 
         cfg = self.config
+
+        # ── Optional WebGPU compute path (passes 1, 1b, 2) ───────────────────
+        # Lazy-initialize on first frame that needs the GPU.  On failure the
+        # backend is set to None and we fall through to the CPU path below.
+        if cfg.sardine_use_gpu:
+            if not self._gpu_init_tried:
+                self._gpu_init_tried = True
+                from sim.sardine_gpu import try_create_backend  # noqa: PLC0415
+                self._gpu_backend = try_create_backend()
+            if self._gpu_backend is not None:
+                try:
+                    gpu_acc = self._gpu_backend.compute_forces(
+                        n, self._s_pos, self._s_vel,
+                        self.sailfish, self._mouse_stimulus, cfg,
+                    )
+                    sa[:] = gpu_acc
+                    # Pass 3: noise — kept on CPU (WGSL PRNG not worth complexity).
+                    w_noise = cfg.weight_noise
+                    if w_noise != 0.0:
+                        sp = self._s_pos[:n]
+                        sv = self._s_vel[:n]
+                        max_speed = float(cfg.sardine_max_speed)
+                        max_force = float(cfg.sardine_max_force)
+                        _EPS  = 1e-9
+                        noise = np.random.normal(0.0, 1.0, (n, 2))
+                        mag_n = np.hypot(noise[:, 0], noise[:, 1])
+                        valid_n = mag_n > _EPS
+                        if valid_n.any():
+                            inv_mag_n = np.where(valid_n, 1.0 / np.maximum(mag_n, _EPS), 0.0)
+                            des_x = noise[:, 0] * inv_mag_n * max_speed
+                            des_y = noise[:, 1] * inv_mag_n * max_speed
+                            stx = des_x - sv[:, 0]
+                            sty = des_y - sv[:, 1]
+                            stm = np.hypot(stx, sty)
+                            over_n = valid_n & (stm > max_force)
+                            scale_n = np.where(over_n, max_force / np.maximum(stm, _EPS), 1.0)
+                            sa[:, 0] += stx * scale_n * w_noise * valid_n
+                            sa[:, 1] += sty * scale_n * w_noise * valid_n
+                    return
+                except Exception as _gpu_exc:  # noqa: BLE001
+                    import logging as _log  # noqa: PLC0415
+                    _log.getLogger(__name__).warning(
+                        "sardine_gpu: frame error (%s) — disabling GPU path.", _gpu_exc
+                    )
+                    self._gpu_backend = None
+                    sa[:] = 0.0   # reset before CPU fallback
         W   = float(cfg.window_width)
         H   = float(cfg.window_height)
         hw  = W * 0.5
@@ -1750,6 +1804,10 @@ class Simulation:
         self.debug_group_strike_cooldown = 0.0
         # Refresh baitball detection interval from config.
         self._baitball_detect_interval = max(1, int(new_config.baitball_detect_interval))
+        # If GPU was just enabled and we haven't tried (or previously failed),
+        # allow a fresh attempt so toggling the menu item takes effect.
+        if new_config.sardine_use_gpu and self._gpu_backend is None:
+            self._gpu_init_tried = False
 
     # ── Mouse predator interface ──────────────────────────────────────
 

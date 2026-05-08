@@ -371,8 +371,53 @@ BENCHMARK_SCENARIOS: list[Scenario] = [
     ),
 ]
 
+# ── GPU comparison scenario catalogue ─────────────────────────────────────────
+# Run via --scenario gpu_baseline / gpu_worst_case, or via --compare-gpu.
+# Each mirrors a CPU scenario but adds sardine_use_gpu=True.
+# Requires wgpu-py (pip install wgpu); silently falls back to CPU if unavailable.
+GPU_SCENARIOS: list[Scenario] = [
+
+    # ── 9. GPU baseline ────────────────────────────────────────────────────────
+    Scenario(
+        name="gpu_baseline",
+        description="GPU sardine forces: 1500 sardines, no predators (mirrors 'baseline')",
+        config_kwargs=_base(
+            num_sardines=1500,
+            num_algae=0,
+            algae_max_count=0,
+            num_sailfish=0,
+            sardine_starvation_time=0.0,
+            sardine_eat_threshold=0,
+            sailfish_baitball_enabled=False,
+            sardine_use_gpu=True,
+        ),
+        collect_subsystem=True,
+        note="WebGPU backend via wgpu-py (Metal on macOS). Falls back to CPU if unavailable.",
+    ),
+
+    # ── 10. GPU worst case ─────────────────────────────────────────────────────
+    Scenario(
+        name="gpu_worst_case",
+        description="GPU sardine forces: 2500 sardines, full ecology (mirrors 'worst_case')",
+        config_kwargs=_base(
+            num_sardines=2500,
+            num_algae=1200,
+            num_sailfish=10,
+            sailfish_baitball_enabled=True,
+            sailfish_herding_enabled=True,
+            sailfish_baitball_strike_enabled=True,
+            baitball_detect_interval=1,
+            sardine_use_gpu=True,
+        ),
+        collect_subsystem=True,
+        note="WebGPU backend via wgpu-py (Metal on macOS). Falls back to CPU if unavailable.",
+    ),
+]
+
 # Index for fast name lookup
-_SCENARIO_BY_NAME: dict[str, Scenario] = {s.name: s for s in BENCHMARK_SCENARIOS}
+_SCENARIO_BY_NAME: dict[str, Scenario] = {
+    s.name: s for s in BENCHMARK_SCENARIOS + GPU_SCENARIOS
+}
 
 
 # ── Regression scenarios — used only by --test ─────────────────────────────────
@@ -641,6 +686,59 @@ def run_regression_test(frames: int, warmup: int) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# GPU vs CPU comparison (--compare-gpu)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# CPU/GPU scenario pairs: (cpu_name, gpu_name)
+_GPU_COMPARE_PAIRS: list[tuple[str, str]] = [
+    ("baseline",   "gpu_baseline"),
+    ("worst_case", "gpu_worst_case"),
+]
+
+
+def run_gpu_comparison(frames: int, warmup: int, *, verbose: bool = False) -> None:
+    """Run CPU vs WebGPU head-to-head comparison and print a delta table."""
+    print(f"\nCPU vs WebGPU comparison — {frames} frames (+{warmup} warmup)\n")
+    col = f"  {'scenario':<18}  {'avg ms':>8}  {'sardine ms':>10}  {'note'}"
+    print(col)
+    print("  " + "-" * 65)
+
+    for cpu_name, gpu_name in _GPU_COMPARE_PAIRS:
+        sc_cpu = _SCENARIO_BY_NAME[cpu_name]
+        sc_gpu = _SCENARIO_BY_NAME[gpu_name]
+
+        r_cpu = run_scenario(sc_cpu, frames, warmup)
+        r_gpu = run_scenario(sc_gpu, frames, warmup)
+
+        delta_avg = r_gpu.avg_ms - r_cpu.avg_ms
+        sign = "+" if delta_avg >= 0 else ""
+        delta_str = f"{sign}{delta_avg:.2f} ms"
+
+        def sf_ms(r: BenchResult) -> str:
+            v = r.subsystem_avgs.get("sardine_ms")
+            return f"{v:.2f}" if v is not None else "   —  "
+
+        print(
+            f"  {cpu_name:<18}  {r_cpu.avg_ms:>7.2f}   {sf_ms(r_cpu):>10}  CPU"
+        )
+        print(
+            f"  {gpu_name:<18}  {r_gpu.avg_ms:>7.2f}   {sf_ms(r_gpu):>10}  GPU"
+        )
+        print(
+            f"  {'  delta':<18}  {delta_str:>8}"
+            + f"  ({r_cpu.avg_ms / r_gpu.avg_ms:.2f}× speedup)"
+            if r_gpu.avg_ms > 0 else ""
+        )
+        print()
+
+        if verbose:
+            print("  CPU detail:")
+            print_result(r_cpu, verbose=True)
+            print("  GPU detail:")
+            print_result(r_gpu, verbose=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -681,6 +779,10 @@ def main() -> None:
         "--csv", metavar="PATH",
         help="Export results to a CSV file for longitudinal comparison",
     )
+    parser.add_argument(
+        "--compare-gpu", action="store_true",
+        help="Run CPU vs WebGPU head-to-head comparison (baseline and worst_case)",
+    )
     args = parser.parse_args()
 
     # ── cProfile mode ──────────────────────────────────────────────────────────
@@ -693,10 +795,16 @@ def main() -> None:
         run_regression_test(args.frames, args.warmup)
         return
 
+    # ── CPU vs GPU comparison mode ─────────────────────────────────────────────
+    if args.compare_gpu:
+        run_gpu_comparison(args.frames, args.warmup, verbose=args.verbose)
+        return
+
     # ── Benchmark mode ─────────────────────────────────────────────────────────
     if args.scenario:
+        all_scenarios = BENCHMARK_SCENARIOS + GPU_SCENARIOS
         if args.scenario not in _SCENARIO_BY_NAME:
-            names = ", ".join(s.name for s in BENCHMARK_SCENARIOS)
+            names = ", ".join(s.name for s in all_scenarios)
             raise SystemExit(
                 f"Unknown scenario '{args.scenario}'.  "
                 f"Available: {names}"
