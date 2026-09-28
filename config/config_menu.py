@@ -201,6 +201,10 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     _MenuItem("Tgt dist wt",     "sailfish_target_dist_weight",    0.1,  0.5,  0.0,   5.0),
     _MenuItem("Tgt iso wt",      "sailfish_target_isolation_weight",0.1, 0.5,  0.0,   5.0),
     _MenuItem("Tgt spd wt",      "sailfish_target_speed_weight",   0.1,  0.5,  0.0,   5.0),
+    _MenuItem("Tgt edge wt",     "sailfish_target_edge_weight",    0.1,  0.5,  0.0,   5.0),
+    _MenuItem("Tgt hunger wt",   "sailfish_target_hunger_weight",  0.05, 0.2,  0.0,   3.0),
+    _MenuItem("Tgt shared pen",  "sailfish_target_shared_penalty_weight", 0.1, 0.5, 0.0, 5.0),
+    _MenuItem("Tgt decision m",  "sailfish_target_decision_margin", 0.02, 0.1, 0.0, 2.0),
     # School-pressure / orbit bias (activates when no target, school dense)
     _MenuItem("Pressure str",    "sailfish_school_pressure_strength",        0.1, 0.5, 0.0, 5.0),
     _MenuItem("Pressure dens",   "sailfish_school_pressure_density_threshold", 1.0, 5.0, 1.0, 100.0),
@@ -213,6 +217,10 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     _MenuItem("Baitball min #",  "sailfish_baitball_min_sardines", 1.0, 5.0, 4.0, 300.0),
     _MenuItem("Baitball dens",   "sailfish_baitball_density_threshold", 0.02, 0.1, 0.05, 5.0),
     _MenuItem("Baitball memory", "sailfish_baitball_memory_seconds", 0.1, 0.5, 0.0, 10.0),
+    _MenuItem("BB score edge", "sailfish_baitball_score_edge_weight", 0.1, 0.5, 0.0, 5.0),
+    _MenuItem("BB score dens", "sailfish_baitball_score_density_weight", 0.1, 0.5, 0.0, 5.0),
+    _MenuItem("BB score rad",  "sailfish_baitball_score_radius_weight", 0.05, 0.2, 0.0, 3.0),
+    _MenuItem("BB score coop", "sailfish_baitball_score_coop_weight", 0.1, 0.5, 0.0, 5.0),
     _ToggleItem("Lock suppress", "sailfish_target_lock_suppressed_near_baitball"),
     _MenuItem("BB patience",   "sailfish_baitball_patience_seconds", 0.1, 0.5, 0.0, 12.0),
     _MenuItem("BB min orbit",  "sailfish_baitball_min_orbit_seconds", 0.1, 0.5, 0.0, 12.0),
@@ -228,6 +236,8 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     # Baitball strike
     _ToggleItem("BB strike",     "sailfish_baitball_strike_enabled"),
     _MenuItem("BB dens strike",  "sailfish_baitball_strike_density_threshold", 0.02, 0.1, 0.05, 5.0),
+    # NOTE: sailfish_baitball_edge_target_chance is retained in config for backward
+    # compatibility but is not read by sailfish.py; this row has no effect on behaviour.
     _MenuItem("BB edge p",       "sailfish_baitball_edge_target_chance", 0.02, 0.1, 0.0, 1.0),
     _MenuItem("BB center p",     "sailfish_baitball_center_strike_chance", 0.02, 0.1, 0.0, 1.0),
     _MenuItem("BB edge band",    "sailfish_baitball_edge_band_width", 1.0, 5.0, 2.0, 100.0),
@@ -287,7 +297,7 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     # Sardine
     _MenuItem("Sardine repro",   "sardine_eat_threshold",    1.0,   5.0,   0.0,   20.0),
     _MenuItem("Sardine starve",  "sardine_starvation_time",  1.0,  10.0,   0.0,  300.0),
-    _MenuItem("Sardine max",     "sardine_max_count",       100.0, 200.0,   0.0, 5000.0),
+    _MenuItem("Sardine max",     "sardine_max_count",       100.0, 200.0,   0.0, 10000.0),
     # Sailfish
     _MenuItem("Sailfish eat r",  "sailfish_eat_radius",      1.0,   5.0,  10.0,   80.0),
     _MenuItem("Sailfish repro",  "sailfish_eat_threshold",   1.0,   5.0,   0.0,   75.0),
@@ -313,6 +323,10 @@ _ROWS: list[_MenuItem | _ToggleItem | _CycleItem | _SaveRow | _GroupRow] = [
     _ToggleItem("Frame timing HUD", "debug_frame_timing_enabled"),
     _MenuItem("BB detect intv",  "baitball_detect_interval", 1.0, 1.0, 1.0, 10.0),
     _ToggleItem("GPU sardine forces", "sardine_use_gpu"),
+
+    # ── Power management ───────────────────────────────────────────────
+    _GroupRow("POWER MANAGEMENT"),
+    _ToggleItem("Prevent sleep",  "prevent_system_sleep"),
 
     _SaveRow(),
 ]

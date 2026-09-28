@@ -132,6 +132,33 @@ def _hsv_to_rgb(h: float, s: float, v: float) -> tuple[int, int, int]:
     return int(r * 255), int(g * 255), int(b * 255)
 
 
+def _prune_removed_shapes(
+    shape_map: dict[int, object],
+    live_ids: set[int],
+    *,
+    extra_maps: tuple[dict[int, object], ...] = (),
+) -> int:
+    """Delete and remove any cached shapes whose boid id is no longer live.
+
+    This is a safety-net for cases where update() can run more than once
+    before draw() consumes per-frame side-channel ids (e.g. starvation/eaten
+    notifications).  In those cases, stale ids can be cleared before draw()
+    sees them.  Reconciling against the live simulation ids guarantees renderer
+    caches cannot retain frozen orphan shapes.
+    """
+    stale_ids = [sid for sid in shape_map if sid not in live_ids]
+    if not stale_ids:
+        return 0
+
+    for sid in stale_ids:
+        shape = shape_map.pop(sid, None)
+        if shape is not None and hasattr(shape, "delete"):
+            shape.delete()
+        for m in extra_maps:
+            m.pop(sid, None)
+    return len(stale_ids)
+
+
 class _VelColorState:
     """Per-fish state needed to estimate turn rate between frames.
 
@@ -705,6 +732,27 @@ class Renderer:
                 self._sardine_shapes.append(tri)
                 self._vel_states.append(self._sardine_vel_map[id(s)])
 
+        # Safety-net reconciliation: if update() advanced more than once before
+        # this draw, per-frame death/birth side-channels may have been cleared
+        # before consumption.  On any count mismatch, reconcile maps against the
+        # authoritative simulation lists so no stale frozen triangles remain.
+        if len(self._sardine_shape_map) != len(simulation.sardines):
+            live_ids = {id(s) for s in simulation.sardines}
+            _prune_removed_shapes(
+                self._sardine_shape_map,
+                live_ids,
+                extra_maps=(self._sardine_vel_map,),
+            )
+            s_size_f = float(cfg.sardine_size)
+            for s in simulation.sardines:
+                sid = id(s)
+                if sid not in self._sardine_shape_map:
+                    tri = self._make_shapes([s], s_size_f, _SARDINE_COLOR)[0]
+                    self._sardine_shape_map[sid] = tri
+                    self._sardine_vel_map[sid] = _VelColorState()
+            self._sardine_shapes = [self._sardine_shape_map[id(s)] for s in simulation.sardines]
+            self._vel_states = [self._sardine_vel_map[id(s)] for s in simulation.sardines]
+
         # ── Detect sardine color transition (driver and/or palette) ───────
         if (sardine_driver != self._prev_sardine_driver
                 or sardine_palette != self._prev_sardine_palette):
@@ -789,6 +837,18 @@ class Renderer:
                     tri = self._make_shapes([sf], sf_size_f, sf_color)[0]
                     self._sailfish_shape_map[id(sf)] = tri
                 self._sailfish_shapes.append(tri)
+
+        if len(self._sailfish_shape_map) != len(simulation.sailfish):
+            live_sf_ids = {id(sf) for sf in simulation.sailfish}
+            _prune_removed_shapes(self._sailfish_shape_map, live_sf_ids)
+            sf_size_f = float(cfg.sailfish_size)
+            sf_color = _SAILFISH_COLORS.get(cfg.sailfish_color_mode, _SAILFISH_COLOR_DEFAULT)
+            for sf in simulation.sailfish:
+                sfid = id(sf)
+                if sfid not in self._sailfish_shape_map:
+                    tri = self._make_shapes([sf], sf_size_f, sf_color)[0]
+                    self._sailfish_shape_map[sfid] = tri
+            self._sailfish_shapes = [self._sailfish_shape_map[id(sf)] for sf in simulation.sailfish]
         _sync_shapes(
             self._sailfish_shapes, simulation.sailfish,
             sailfish_size_f,
@@ -833,6 +893,16 @@ class Renderer:
                     self._algae_shape_map[id(a)] = shape
                 new_shapes.append(shape)
             self._algae_shapes = new_shapes
+
+        if len(self._algae_shape_map) != len(simulation.algae):
+            live_algae_ids = {id(a) for a in simulation.algae}
+            _prune_removed_shapes(self._algae_shape_map, live_algae_ids)
+            for a in simulation.algae:
+                aid = id(a)
+                if aid not in self._algae_shape_map:
+                    circle = self._make_algae_shapes([a], algae_size_f, _ALGAE_COLOR)[0]
+                    self._algae_shape_map[aid] = circle
+            self._algae_shapes = [self._algae_shape_map[id(a)] for a in simulation.algae]
         _sync_circle_positions(
             self._algae_shapes, simulation.algae,
         )

@@ -105,6 +105,7 @@ class BenchResult:
     pop_end:           tuple  # same triple after timing run
     subsystem_avgs:    dict   # {subsystem: avg_ms}; empty when not collected
     baitball_count:    int    # sim.debug_baitball_count at end (0 if N/A)
+    decision_counts:   dict   # {decision_kind: count} over timed frames
     note:              str    # human-readable limitation note (may be empty)
 
     # ── Derived statistics ─────────────────────────────────────────────
@@ -369,6 +370,100 @@ BENCHMARK_SCENARIOS: list[Scenario] = [
         collect_subsystem=True,
         note="Headless: rendering overhead excluded.",
     ),
+
+    # ── 9. Target decision: one dense baitball ─────────────────────────────
+    Scenario(
+        name="target_dense_one",
+        description="Target decision mix: one dense baitball",
+        config_kwargs=_base(
+            window_width=900,
+            window_height=600,
+            num_sardines=900,
+            num_algae=0,
+            algae_max_count=0,
+            num_sailfish=10,
+            sardine_starvation_time=0.0,
+            sardine_eat_threshold=0,
+            sailfish_starvation_enabled=False,
+            sailfish_reproduction_enabled=False,
+            sailfish_baitball_enabled=True,
+            sailfish_herding_enabled=True,
+            sailfish_baitball_strike_enabled=True,
+            baitball_detect_interval=1,
+        ),
+        collect_subsystem=True,
+    ),
+
+    # ── 10. Target decision: two dense baitballs ───────────────────────────
+    Scenario(
+        name="target_two_baitballs",
+        description="Target decision mix: two dense baitballs",
+        config_kwargs=_base(
+            window_width=1400,
+            window_height=700,
+            num_sardines=1400,
+            num_algae=0,
+            algae_max_count=0,
+            num_sailfish=12,
+            sardine_starvation_time=0.0,
+            sardine_eat_threshold=0,
+            sailfish_starvation_enabled=False,
+            sailfish_reproduction_enabled=False,
+            sailfish_baitball_enabled=True,
+            sailfish_herding_enabled=True,
+            sailfish_baitball_strike_enabled=True,
+            baitball_detect_interval=1,
+        ),
+        collect_subsystem=True,
+    ),
+
+    # ── 11. Target decision: scattered sardines ─────────────────────────────
+    Scenario(
+        name="target_scattered",
+        description="Target decision mix: sparse scattered sardines",
+        config_kwargs=_base(
+            window_width=1920,
+            window_height=1080,
+            num_sardines=800,
+            num_algae=0,
+            algae_max_count=0,
+            num_sailfish=10,
+            sardine_starvation_time=0.0,
+            sardine_eat_threshold=0,
+            sailfish_starvation_enabled=False,
+            sailfish_reproduction_enabled=False,
+            sailfish_baitball_enabled=True,
+            sailfish_herding_enabled=True,
+            sailfish_baitball_strike_enabled=True,
+            sailfish_baitball_density_threshold=0.40,
+            baitball_detect_interval=1,
+        ),
+        collect_subsystem=True,
+    ),
+
+    # ── 12. Target decision: mixed dense + isolated ─────────────────────────
+    Scenario(
+        name="target_mixed",
+        description="Target decision mix: dense school plus isolated fish",
+        config_kwargs=_base(
+            window_width=1400,
+            window_height=700,
+            num_sardines=1100,
+            num_algae=0,
+            algae_max_count=0,
+            num_sailfish=12,
+            sardine_starvation_time=0.0,
+            sardine_eat_threshold=0,
+            sailfish_starvation_enabled=False,
+            sailfish_reproduction_enabled=False,
+            sailfish_baitball_enabled=True,
+            sailfish_herding_enabled=True,
+            sailfish_baitball_strike_enabled=True,
+            sailfish_target_decision_margin=0.12,
+            baitball_detect_interval=1,
+        ),
+        collect_subsystem=True,
+    ),
 ]
 
 # ── GPU comparison scenario catalogue ─────────────────────────────────────────
@@ -471,6 +566,13 @@ def run_scenario(scenario: Scenario, frames: int, warmup: int) -> BenchResult:
 
     pop_start = (len(sim.sardines), len(sim.algae), len(sim.sailfish))
     _warmup(sim, warmup)
+    dec_start = {
+        "isolated": sim.stats_target_decision_isolated,
+        "orbit": sim.stats_target_decision_baitball_orbit,
+        "strike": sim.stats_target_decision_baitball_strike,
+        "track_com": sim.stats_target_decision_track_com,
+        "none": sim.stats_target_decision_none,
+    }
 
     # Per-subsystem accumulation buffers (filled only if collect_subsystem).
     ss_sardine:  list[float] = []
@@ -493,6 +595,13 @@ def run_scenario(scenario: Scenario, frames: int, warmup: int) -> BenchResult:
             ss_algae.append(sim.dbg_ms_algae_update)
 
     pop_end = (len(sim.sardines), len(sim.algae), len(sim.sailfish))
+    decision_counts = {
+        "isolated": sim.stats_target_decision_isolated - dec_start["isolated"],
+        "orbit": sim.stats_target_decision_baitball_orbit - dec_start["orbit"],
+        "strike": sim.stats_target_decision_baitball_strike - dec_start["strike"],
+        "track_com": sim.stats_target_decision_track_com - dec_start["track_com"],
+        "none": sim.stats_target_decision_none - dec_start["none"],
+    }
 
     subsystem_avgs: dict[str, float] = {}
     if collect:
@@ -512,6 +621,7 @@ def run_scenario(scenario: Scenario, frames: int, warmup: int) -> BenchResult:
         pop_end=pop_end,
         subsystem_avgs=subsystem_avgs,
         baitball_count=sim.debug_baitball_count,
+        decision_counts=decision_counts,
         note=scenario.note,
     )
 
@@ -549,6 +659,19 @@ def print_result(r: BenchResult, verbose: bool = False) -> None:
         if parts:
             print(f"    subsystem (ms):  {',  '.join(parts)}")
 
+    if verbose and r.decision_counts:
+        dc = r.decision_counts
+        total = sum(dc.values())
+        if total > 0:
+            print(
+                "    target decisions: "
+                f"isolated {dc.get('isolated', 0)}, "
+                f"orbit {dc.get('orbit', 0)}, "
+                f"strike {dc.get('strike', 0)}, "
+                f"track_com {dc.get('track_com', 0)}, "
+                f"none {dc.get('none', 0)}"
+            )
+
     if r.note:
         print(f"    note: {r.note}")
 
@@ -575,6 +698,8 @@ def export_csv(results: list[BenchResult], path: str) -> None:
         "sardines_start", "algae_start", "sailfish_start",
         "sardines_end",   "algae_end",   "sailfish_end",
         "baitball_count",
+        "decision_isolated", "decision_orbit", "decision_strike",
+        "decision_track_com", "decision_none",
         "sardine_subsys_ms", "sailfish_subsys_ms",
         "baitball_subsys_ms", "algae_subsys_ms",
     ]
@@ -599,6 +724,11 @@ def export_csv(results: list[BenchResult], path: str) -> None:
                 "sardines_start": ps, "algae_start": as_, "sailfish_start": fs,
                 "sardines_end":   pe, "algae_end":   ae,  "sailfish_end":   fe,
                 "baitball_count": r.baitball_count,
+                "decision_isolated": r.decision_counts.get("isolated", 0),
+                "decision_orbit": r.decision_counts.get("orbit", 0),
+                "decision_strike": r.decision_counts.get("strike", 0),
+                "decision_track_com": r.decision_counts.get("track_com", 0),
+                "decision_none": r.decision_counts.get("none", 0),
                 "sardine_subsys_ms":  f"{sa.get('sardine_ms',  0):.4f}",
                 "sailfish_subsys_ms": f"{sa.get('sailfish_ms', 0):.4f}",
                 "baitball_subsys_ms": f"{sa.get('baitball_ms', 0):.4f}",

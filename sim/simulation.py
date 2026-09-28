@@ -163,6 +163,13 @@ class Simulation:
         # Monotonically increasing count of sailfish born by reproduction.
         self.stats_sailfish_births: int = 0
 
+        # Count of sailfish eating attempts blocked by the per-state eating gate
+        # (PATROL, RECOVER).  Monotonically increasing.
+        # A high value relative to stats_sardines_eaten suggests sailfish are
+        # spending too much time in non-hunting states; watch for starvation
+        # spikes if this is high while sardine density is also high.
+        self.stats_eat_blocked_by_state: int = 0
+
         # ── Algae respawn side-channel ─────────────────────────────────
         # New Algae objects spawned by the respawn pass this frame.
         # Renderer.draw() reads this to allocate matching Triangle shapes.
@@ -228,6 +235,14 @@ class Simulation:
         self.stats_center_strikes: int = 0
         self.stats_edge_strikes: int = 0
         self._baitball_group_strike_cooldown_timer: float = 0.0
+
+        # Hunting decision diagnostics accumulated from sailfish per-frame
+        # debug_last_target_decision markers.
+        self.stats_target_decision_isolated: int = 0
+        self.stats_target_decision_baitball_orbit: int = 0
+        self.stats_target_decision_baitball_strike: int = 0
+        self.stats_target_decision_track_com: int = 0
+        self.stats_target_decision_none: int = 0
 
         # ── Baitball detection throttle ───────────────────────────────
         # Running _detect_baitballs() every frame is expensive (~2ms at 1500
@@ -486,6 +501,20 @@ class Simulation:
         self.debug_herding_sailfish = sum(1 for sf in self.sailfish if sf._is_herding)
         self.debug_orbit_sailfish = sum(1 for sf in self.sailfish if sf.state == "orbit_baitball")
 
+        # Per-frame target decision aggregation for lightweight diagnostics.
+        for sf in self.sailfish:
+            kind = getattr(sf, "debug_last_target_decision", "no_target")
+            if kind == "isolated_target":
+                self.stats_target_decision_isolated += 1
+            elif kind == "baitball_orbit":
+                self.stats_target_decision_baitball_orbit += 1
+            elif kind == "baitball_strike":
+                self.stats_target_decision_baitball_strike += 1
+            elif kind == "track_com":
+                self.stats_target_decision_track_com += 1
+            else:
+                self.stats_target_decision_none += 1
+
         # 4 — Phase 4B/4C: batch integrate all sardines.
         # _s_acc is already populated by _batch_compute_sardine_forces() above.
         # _batch_integrate_sardines() integrates vel, clamps speed, integrates
@@ -508,7 +537,7 @@ class Simulation:
             # 1 — increment hunger timer for every sardine regardless of eating.
             for sardine in self.sardines:
                 sardine.hunger_timer += dt
-                sardine.age += dt  # increment age for all sardines (used in Stage 8.6 for max age death)
+                sardine.age += dt  # used by sardine_color_driver="age" and population graph
 
             # 2 — sardine-algae contact eating.
             if self.algae:
@@ -626,10 +655,33 @@ class Simulation:
         # Sailfish-sardine eating: one kill per sailfish per tick.
         # Runs after sardine reproduction so newly born sardines are not in
         # _grid (built at frame start) and cannot be immediately eaten.
+        #
+        # Per-state eating gate: only actively hunting sailfish can kill.
+        # PATROL and RECOVER sailfish are not pursuing prey and should not
+        # incidentally eat sardines that drift within eat_radius.  This
+        # tightens the ecology coupling between the FSM and predation.
+        # ORBIT_BAITBALL is intentionally included: orbiting fish are part of
+        # active cooperative hunting and can opportunistically eat edge fish.
+        #
+        # stats_eat_blocked_by_state increments each time a kill would have
+        # occurred under the old stateless rule but is now gated out.  Check
+        # this counter via HUD timing or benchmark --verbose to monitor
+        # whether the gate is causing meaningful starvation pressure.
+        _EATING_STATES: frozenset[str] = frozenset({
+            "track_school",
+            "orbit_baitball",
+            "target_lock",
+            "burst_attack",
+            "baitball_strike",
+        })
         if self.sailfish and self.sardines:
             eat_r = self.config.sailfish_eat_radius
             to_remove: set = set()
             for sf in self.sailfish:
+                if sf.state not in _EATING_STATES:
+                    # Non-hunting state: skip eating; count the block for diagnostics.
+                    self.stats_eat_blocked_by_state += 1
+                    continue
                 prey = self._grid.query_first(sf, eat_r)  # one kill per sailfish per tick
                 if prey is not None:
                     to_remove.add(prey)

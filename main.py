@@ -25,6 +25,7 @@ from config.config_io import load_overrides
 from config.config_menu import ConfigMenu
 from sim.simulation import Simulation
 from rendering.renderer import Renderer
+from utils import sleep_prevention
 
 
 def main() -> None:
@@ -51,6 +52,12 @@ def main() -> None:
         window_height=window.height,
         **load_overrides(),   # saved user prefs layered over code defaults
     )
+
+    # Prevent the host from sleeping while the simulation window is open.
+    # Released in on_close and in the finally block below.
+    if config.prevent_system_sleep:
+        sleep_prevention.enable_sleep_prevention()
+
     simulation = Simulation(config)
 
     # Renderer must be created after the window so the GL context is active.
@@ -169,7 +176,17 @@ def main() -> None:
     # Advance simulation at the target frame rate; pyglet redraws via on_draw.
     pyglet.clock.schedule_interval(update, 1.0 / config.target_fps)
 
-    pyglet.app.run()
+    @window.event
+    def on_close() -> None:
+        sleep_prevention.disable_sleep_prevention()
+        window.close()
+
+    try:
+        pyglet.app.run()
+    finally:
+        # Belt-and-suspenders: release even if pyglet exits via an exception
+        # or signal rather than a normal on_close event.
+        sleep_prevention.disable_sleep_prevention()
 
 
 if __name__ == "__main__":

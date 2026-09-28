@@ -504,14 +504,6 @@ class SimConfig:
     # sub-clusters.  Set to 0 to disable the limit (no maximum radius).
     sailfish_baitball_max_merge_radius: float = 400.0
 
-    # When True, suppresses new individual TARGET_LOCK acquisition while a
-    # dense baitball is active, unless the candidate sardine is in the
-    # outer edge band (see sailfish_baitball_edge_band_width).  This prevents
-    # sailfish from abandoning the cooperative herding formation to chase
-    # individual sardines deep in the school.  Set False to allow individual
-    # lock regardless of baitball state (reverts to pre-baitball behavior).
-    sailfish_target_lock_suppressed_near_baitball: bool = True
-
     # ═══════════════════════════════════════════════════════════════════
     # PROTO-COLLABORATION / TURN-TAKING
     # ═══════════════════════════════════════════════════════════════════
@@ -555,12 +547,14 @@ class SimConfig:
     # on a sardine in the outer band of the baitball.  This is the more
     # common strike type; center pass-throughs are rarer.
 
-    # Per-second probability that an orbit-ready sailfish launches an edge
-    # target strike (given all cooldowns are clear).  Converted to a
-    # per-frame probability internally.  0.14/s means a ready sailfish will
-    # attempt an edge strike roughly every 7 seconds on average once patience
-    # is satisfied.  Increase for more frequent edge strikes.
-    sailfish_baitball_edge_target_chance: float = 0.14
+    # LEGACY / NOT READ — formerly used as the per-second probability that an
+    # orbit-ready sailfish launches an edge target strike.  Superseded by the
+    # query_hunting_target() scoring system (2026-05-08): edge-target opportunities
+    # are now scored and compared against cooperative baitball pressure rather than
+    # rolled as an independent per-frame probability.  Retained for backward
+    # compatibility with boids_overrides.json files and test fixtures that may set
+    # it; the value has zero effect on simulation behaviour.
+    sailfish_baitball_edge_target_chance: float = 0.14  # DEAD — zero behavioral effect
 
     # Per-second probability that an orbit-ready sailfish launches a center
     # pass-through strike.  Should be lower than edge target chance to make
@@ -649,11 +643,12 @@ class SimConfig:
     # rigidly to their slots and negate the per-fish variation system.
     sailfish_herding_pressure_strength: float = 0.95
 
-    # Random angular offset applied to each sailfish's assigned slot (radians,
-    # scaled by this value).  Breaks perfect symmetry in the evenly-spaced
-    # ring.  Higher values allow adjacent fish to drift closer together,
-    # creating a more organic (less geometric) distribution.
-    sailfish_herding_slot_jitter: float = 0.35
+    # LEGACY / NOT READ — superseded by sailfish_baitball_slot_jitter (BAITBALL
+    # ORBIT FORCE MODEL section), which drives the per-fish angular jitter in
+    # _apply_herding_pressure().  This field is retained only for backward
+    # compatibility with saved boids_overrides.json files that include it;
+    # changing its value has no effect on simulation behaviour.
+    sailfish_herding_slot_jitter: float = 0.35  # DEAD — zero behavioral effect
 
     # Minimum number of sailfish required before cooperative herding
     # activates.  Below this count, individual hunting is more efficient.
@@ -678,12 +673,14 @@ class SimConfig:
     # selective center strikes.
     sailfish_baitball_strike_density_threshold: float = 0.34
 
-    # Legacy field — formerly used as the single strike-chance probability.
-    # Now superseded by sailfish_baitball_center_strike_chance (per-second
-    # probability for center passes) and sailfish_baitball_edge_target_chance
-    # (per-second probability for edge target locks).  Retained for backward
-    # compatibility with any code paths that still reference it.
-    sailfish_baitball_strike_chance: float = 0.08
+    # LEGACY / NOT READ — formerly used as the single strike-chance probability.
+    # Superseded by sailfish_baitball_center_strike_chance (per-second probability
+    # for center pass-through strikes) and the query_hunting_target() scoring
+    # system (for edge target selection introduced 2026-05-08).  No active code
+    # path in sailfish.py or simulation.py reads this field.  Retained ONLY for
+    # backward compatibility with boids_overrides.json files and test fixtures that
+    # may set it; the value has zero effect on simulation behaviour.
+    sailfish_baitball_strike_chance: float = 0.08  # DEAD — zero behavioral effect
 
     # Speed multiplier during a center pass-through strike.  Applied on top
     # of sailfish_max_speed for the duration of the BAITBALL_STRIKE state.
@@ -897,6 +894,32 @@ class SimConfig:
     # sardine_max_speed.  Slow fish are easier to intercept and may indicate
     # injured, old, or disoriented individuals.  Normalized by max_speed^2.
     sailfish_target_speed_weight: float = 0.8
+
+    # Edge-position score weight for individual target selection.  When a
+    # baitball exists, sardines nearer the perimeter score higher than core
+    # fish, nudging locks toward exposed edge fish.
+    sailfish_target_edge_weight: float = 0.7
+
+    # Hunger-to-aggression coupling for target decisions.  Scales both
+    # individual-target and baitball-choice scores by hunger_timer /
+    # sailfish_starvation_time (clamped to [0,1]).
+    sailfish_target_hunger_weight: float = 0.45
+
+    # Shared-target penalty: score subtraction per nearby sailfish already
+    # holding the same sardine as target.  Encourages target spreading across
+    # edge fish when alternatives exist.
+    sailfish_target_shared_penalty_weight: float = 1.1
+
+    # Minimum score advantage required for baitball orbit/pressure to win
+    # over isolated-target lock in query_hunting_target().
+    sailfish_target_decision_margin: float = 0.18
+
+    # Baitball-choice score weights used by query_hunting_target().  These
+    # tune cooperative-pressure preference versus individual-lock behavior.
+    sailfish_baitball_score_edge_weight: float = 1.0
+    sailfish_baitball_score_density_weight: float = 1.2
+    sailfish_baitball_score_radius_weight: float = 0.45
+    sailfish_baitball_score_coop_weight: float = 0.9
 
     # ═══════════════════════════════════════════════════════════════════
     # SAILFISH STATE MACHINE — SCHOOL-PRESSURE ORBIT (non-baitball)
@@ -1308,6 +1331,21 @@ class SimConfig:
     # fails — no crash, just a logged warning.
     # Only active for n >= 500 sardines (small-population fast path stays on CPU).
     sardine_use_gpu: bool = False
+
+    # ═══════════════════════════════════════════════════════════════════
+    # POWER MANAGEMENT
+    # ═══════════════════════════════════════════════════════════════════
+
+    # When True, the app prevents the host computer from sleeping or dimming
+    # its display while the simulation window is open.  Sleep prevention is
+    # released automatically when the window closes.
+    # macOS: uses a persistent ``caffeinate -d -i -m`` subprocess.
+    # Windows: uses SetThreadExecutionState (ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+    #          | ES_DISPLAY_REQUIRED).
+    # Linux: not supported (fails silently).
+    # Disable this if you prefer the OS idle policy to apply normally, or if
+    # you are running the simulation unattended and want the screen to sleep.
+    prevent_system_sleep: bool = True
 
     # How many frames to stagger baitball detection across.
     # Detection runs on frame N % baitball_detect_interval == 0; between

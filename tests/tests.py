@@ -346,6 +346,18 @@ class TestQueryFirst(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertIn(result, neighbors)
 
+    def test_returns_nearest_candidate(self):
+        """query_first() returns the closest neighbor, not insertion order."""
+        g = self._grid()
+        a = _boid_at(200.0, 200.0)
+        far = _boid_at(245.0, 200.0)   # 45 px
+        near = _boid_at(210.0, 200.0)  # 10 px
+        # Insert farther first to ensure nearest behavior is explicit.
+        g.insert(a)
+        g.insert(far)
+        g.insert(near)
+        self.assertIs(g.query_first(a, radius=60.0), near)
+
     def test_agrees_with_query_empty(self):
         """When query() returns empty, query_first() returns None."""
         g = self._grid()
@@ -1829,13 +1841,21 @@ class TestSailfishEcology(unittest.TestCase):
         self.assertEqual(sim.stats_sardines_eaten, 0)
 
     def test_stats_sardines_eaten_cumulative(self):
-        """stats_sardines_eaten accumulates correctly across multiple frames."""
+        """stats_sardines_eaten accumulates correctly across multiple frames.
+
+        Per-state eating gate note: the sailfish transitions from PATROL →
+        TRACK_SCHOOL → TARGET_LOCK on frame 1 (sardine within awareness and
+        acquire_radius).  Burst is disabled (sailfish_burst_trigger_radius=0)
+        so the sailfish stays in TARGET_LOCK across both frames rather than
+        entering RECOVER after eating the first sardine.
+        """
         from sim.sardine import Sardine
         from sim.sailfish import Sailfish
 
         cfg = SimConfig(
             num_sardines=0, num_sailfish=0, num_algae=0,
             sailfish_eat_radius=20.0,
+            sailfish_burst_trigger_radius=0.0,  # disable burst so sf stays in TARGET_LOCK
             sardine_eat_threshold=0,
             sardine_min_speed=0.0, sailfish_min_speed=0.0,
             weight_separation=0.0, weight_alignment=0.0,
@@ -1851,8 +1871,8 @@ class TestSailfishEcology(unittest.TestCase):
         s1 = Sardine(105.0, 100.0, 0.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
         s2 = Sardine(110.0, 100.0, 0.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
         sim.sardines.extend([s1, s2])
-        sim.update(1 / 60)   # eats first sardine
-        sim.update(1 / 60)   # eats second sardine
+        sim.update(1 / 60)   # eats first sardine; sf in target_lock
+        sim.update(1 / 60)   # eats second sardine; sf re-acquires target_lock
         self.assertEqual(sim.stats_sardines_eaten, 2,
                          "stats_sardines_eaten must accumulate across frames")
         self.assertEqual(sf.food_counter, 2.0,
@@ -1956,6 +1976,217 @@ class TestSailfishEcology(unittest.TestCase):
                                msg="sf2 hunger_timer must reset to 0 after eating")
 
 
+# ── Per-state eating gate ─────────────────────────────────────────────────────
+
+class TestSailfishPerStateEatingGate(unittest.TestCase):
+    """Verify that the per-state eating gate allows kills only in hunting states.
+
+    Hunting states (TRACK_SCHOOL, ORBIT_BAITBALL, TARGET_LOCK, BURST_ATTACK,
+    BAITBALL_STRIKE) should permit eating.  Non-hunting states (PATROL,
+    RECOVER) should not — the gate increments stats_eat_blocked_by_state.
+    """
+
+    # ── Helpers ───────────────────────────────────────────────────────
+
+    def _minimal_cfg(self, **kwargs) -> "SimConfig":
+        """Minimal frozen config with all forces and ecology effects disabled."""
+        base = dict(
+            num_sardines=0, num_sailfish=0, num_algae=0,
+            sailfish_eat_radius=30.0,
+            # Disable all starvation so hunger state is static across frames.
+            sardine_starvation_time=0.0,
+            sailfish_starvation_time=0.0,
+            sailfish_initial_hunger_time=0.0,
+            sardine_initial_hunger_time=0.0,
+            sardine_eat_threshold=0,
+            # Disable all motion forces so agents stay put.
+            sardine_min_speed=0.0, sailfish_min_speed=0.0,
+            weight_separation=0.0, weight_alignment=0.0,
+            weight_cohesion=0.0,   weight_noise=0.0,
+            weight_algae_separation=0.0, weight_algae_alignment=0.0,
+            weight_algae_cohesion=0.0,   weight_algae_noise=0.0,
+            weight_pursuit=0.0, weight_flee=0.0,
+        )
+        base.update(kwargs)
+        return SimConfig(**base)
+
+    def _make_sim_with_sf_in_patrol(self) -> tuple:
+        """Return (sim, sf, sardine) with the sardine outside awareness radius.
+
+        The sailfish cannot detect the sardine so it stays in PATROL, but the
+        sardine IS within eat_radius (30 px).  Used to verify PATROL blocks eating.
+        """
+        from sim.sardine import Sardine
+        from sim.sailfish import Sailfish
+
+        cfg = self._minimal_cfg(
+            # Tiny awareness so the sardine at 10 px is invisible to the sailfish.
+            radius_sailfish_awareness=1.0,
+        )
+        sim = Simulation(cfg)
+        sf = Sailfish(100.0, 100.0, 0.0, 0.0, cfg, sim._grid)
+        sim.sailfish.append(sf)
+        sardine = Sardine(110.0, 100.0, 0.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
+        sim.sardines.append(sardine)
+        return sim, sf, sardine
+
+    def _make_sim_with_sf_in_track_school(self) -> tuple:
+        """Return (sim, sf, sardine) with sf heading to TRACK_SCHOOL but not locking.
+
+        The sardine is within awareness but outside acquire_radius so the sailfish
+        steers toward the COM without acquiring an individual lock.
+        """
+        from sim.sardine import Sardine
+        from sim.sailfish import Sailfish
+
+        cfg = self._minimal_cfg(
+            # Small acquire radius so sardine at 10 px is outside lock range…
+            sailfish_target_acquire_radius=1.0,
+            # …but within awareness (350 default) and eat_radius (30).
+        )
+        sim = Simulation(cfg)
+        sf = Sailfish(100.0, 100.0, 0.0, 0.0, cfg, sim._grid)
+        sim.sailfish.append(sf)
+        sardine = Sardine(110.0, 100.0, 0.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
+        sim.sardines.append(sardine)
+        return sim, sf, sardine
+
+    # ── PATROL: eating must be blocked ────────────────────────────────
+
+    def test_patrol_state_blocks_eating(self):
+        """A sailfish in PATROL does not eat a sardine within eat_radius."""
+        sim, sf, sardine = self._make_sim_with_sf_in_patrol()
+        sim.update(1 / 60)
+        self.assertEqual(sf.state, "patrol",
+                         "Sailfish must remain in PATROL when sardine is outside awareness")
+        self.assertEqual(len(sim.sardines), 1,
+                         "Sardine must NOT be eaten while sailfish is in PATROL")
+        self.assertEqual(sf.food_counter, 0.0,
+                         "food_counter must not increase when eating is blocked by PATROL gate")
+        self.assertEqual(sim.stats_sardines_eaten, 0)
+
+    def test_patrol_block_increments_stats_counter(self):
+        """stats_eat_blocked_by_state increments when PATROL gate blocks a kill."""
+        sim, sf, sardine = self._make_sim_with_sf_in_patrol()
+        initial = sim.stats_eat_blocked_by_state
+        sim.update(1 / 60)
+        self.assertGreater(sim.stats_eat_blocked_by_state, initial,
+                           "stats_eat_blocked_by_state must increment when PATROL blocks eating")
+
+    # ── RECOVER: eating must be blocked ───────────────────────────────
+
+    def test_recover_state_blocks_eating(self):
+        """A sailfish in RECOVER does not eat a sardine within eat_radius."""
+        from sim.sardine import Sardine
+        from sim.sailfish import Sailfish
+
+        cfg = self._minimal_cfg()
+        sim = Simulation(cfg)
+        sf = Sailfish(100.0, 100.0, 0.0, 0.0, cfg, sim._grid)
+        sim.sailfish.append(sf)
+        sardine = Sardine(110.0, 100.0, 0.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
+        sim.sardines.append(sardine)
+
+        # Manually put the sailfish into RECOVER with a long timer so it stays there.
+        sf.sm_to_track_school()
+        sf.sm_to_target_lock()
+        sf.sm_to_burst_attack()
+        sf.sm_to_recover()
+        sf._recovery_timer = 5.0   # will not expire in one frame at dt=1/60
+
+        self.assertEqual(sf.state, "recover")
+        sim.update(1 / 60)
+        self.assertEqual(sf.state, "recover",
+                         "Sailfish must still be in RECOVER after one frame")
+        self.assertEqual(len(sim.sardines), 1,
+                         "Sardine must NOT be eaten while sailfish is in RECOVER")
+        self.assertEqual(sf.food_counter, 0.0)
+
+    # ── TRACK_SCHOOL: eating must be allowed ──────────────────────────
+
+    def test_track_school_state_allows_eating(self):
+        """A sailfish in TRACK_SCHOOL eats a sardine within eat_radius."""
+        sim, sf, sardine = self._make_sim_with_sf_in_track_school()
+        sim.update(1 / 60)
+        self.assertEqual(sf.state, "track_school",
+                         "Sailfish must be in TRACK_SCHOOL when acquire_radius is tiny")
+        self.assertEqual(len(sim.sardines), 0,
+                         "Sardine must be eaten while sailfish is in TRACK_SCHOOL")
+        self.assertEqual(sf.food_counter, 1.0)
+        self.assertEqual(sim.stats_sardines_eaten, 1)
+
+    def test_orbit_baitball_state_allows_eating(self):
+        """A sailfish in ORBIT_BAITBALL can still eat within eat_radius."""
+        from sim.sardine import Sardine
+        from sim.sailfish import Sailfish
+
+        cfg = self._minimal_cfg(
+            sailfish_baitball_enabled=True,
+            sailfish_herding_enabled=True,
+            sailfish_herding_min_sailfish=1,
+            sailfish_baitball_density_threshold=0.05,
+            sailfish_baitball_min_sardines=3,
+            sailfish_baitball_detection_radius=80.0,
+            sailfish_target_acquire_radius=1.0,
+            sailfish_baitball_center_strike_chance=0.0,
+            sailfish_baitball_edge_target_chance=0.0,
+            sailfish_baitball_strike_enabled=False,
+        )
+        sim = Simulation(cfg)
+        sf = Sailfish(100.0, 100.0, 0.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
+        sim.sailfish.append(sf)
+
+        # Create a compact local cluster so baitball detection activates.
+        sim.sardines.append(Sardine(110.0, 100.0, 0.0, 0.0, cfg, sim._grid, sim._sailfish_grid))
+        sim.sardines.append(Sardine(111.0, 102.0, 0.0, 0.0, cfg, sim._grid, sim._sailfish_grid))
+        sim.sardines.append(Sardine(108.0, 99.0, 0.0, 0.0, cfg, sim._grid, sim._sailfish_grid))
+
+        sim.update(1 / 60)
+        self.assertEqual(sf.state, "orbit_baitball")
+        self.assertEqual(len(sim.sardines), 2)
+        self.assertEqual(sf.food_counter, 1.0)
+        self.assertEqual(sim.stats_eat_blocked_by_state, 0)
+
+    # ── BURST_ATTACK: eating must be allowed ──────────────────────────
+
+    def test_burst_attack_state_allows_eating(self):
+        """A sailfish in BURST_ATTACK eats a sardine within eat_radius."""
+        from sim.sardine import Sardine
+        from sim.sailfish import Sailfish
+
+        cfg = self._minimal_cfg(
+            # Large burst trigger so sf immediately bursts on target acquisition.
+            sailfish_burst_trigger_radius=200.0,
+        )
+        sim = Simulation(cfg)
+        sf = Sailfish(100.0, 100.0, 0.0, 0.0, cfg, sim._grid)
+        sim.sailfish.append(sf)
+        sardine = Sardine(110.0, 100.0, 0.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
+        sim.sardines.append(sardine)
+
+        sim.update(1 / 60)
+        # With burst_trigger_radius=200 and sardine at 10 px, sf goes to burst_attack.
+        self.assertIn(sf.state, ("burst_attack", "recover"),
+                      "Sailfish should be in burst_attack (or recover if burst expired in 1 dt)")
+        self.assertEqual(len(sim.sardines), 0,
+                         "Sardine must be eaten while sailfish is in BURST_ATTACK")
+        self.assertEqual(sf.food_counter, 1.0)
+
+    # ── Blocked-state counter attribute exists ────────────────────────
+
+    def test_stats_eat_blocked_by_state_starts_at_zero(self):
+        """stats_eat_blocked_by_state is 0 on a fresh Simulation."""
+        cfg = self._minimal_cfg()
+        sim = Simulation(cfg)
+        self.assertEqual(sim.stats_eat_blocked_by_state, 0)
+
+    def test_stats_eat_blocked_not_incremented_in_hunting_states(self):
+        """stats_eat_blocked_by_state does not increment when eating succeeds."""
+        sim, sf, sardine = self._make_sim_with_sf_in_track_school()
+        sim.update(1 / 60)
+        # Sardine was eaten; gate was not blocked.
+        self.assertEqual(sim.stats_eat_blocked_by_state, 0,
+                         "stats_eat_blocked_by_state must not increment on a successful eat")
 # ── Stage 8.5: sardine starvation ────────────────────────────────────────────
 
 def _make_starvation_sim(
@@ -5085,6 +5316,97 @@ class TestSailfishBaitballCooperation(unittest.TestCase):
         self.assertIn(sf.state, {"orbit_baitball", "baitball_strike", "recover", "target_lock", "burst_attack"})
 
 
+class TestSailfishTargetDecision(unittest.TestCase):
+    """Focused checks for Sailfish.query_hunting_target()."""
+
+    def _cfg(self, **kwargs) -> SimConfig:
+        base = dict(
+            num_sardines=0,
+            num_sailfish=0,
+            num_algae=0,
+            sardine_starvation_time=0.0,
+            sailfish_starvation_time=0.0,
+            sailfish_reproduction_enabled=False,
+            sailfish_starvation_enabled=False,
+            sardine_eat_threshold=0,
+            sailfish_eat_threshold=0,
+            algae_respawn_rate=0.0,
+            weight_noise=0.0,
+            sailfish_target_acquire_radius=180.0,
+            radius_sailfish_awareness=350.0,
+            sailfish_target_lock_suppressed_near_baitball=False,
+        )
+        base.update(kwargs)
+        return SimConfig(**base)
+
+    def test_query_hunting_target_penalizes_shared_target(self):
+        from sim.sardine import Sardine
+        from sim.sailfish import Sailfish
+
+        cfg = self._cfg(sailfish_target_shared_penalty_weight=3.0)
+        sim = Simulation(cfg)
+
+        sf1 = Sailfish(100.0, 100.0, 0.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
+        sf2 = Sailfish(102.0, 100.0, 0.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
+        sim.sailfish.extend([sf1, sf2])
+
+        s1 = Sardine(120.0, 100.0, 0.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
+        s2 = Sardine(124.0, 102.0, 0.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
+        sim.sardines.extend([s1, s2])
+
+        # Build grids and pre-lock sf1 onto s1 so sf2 should avoid sharing it.
+        sim._grid.clear()
+        for s in sim.sardines:
+            sim._grid.insert(s)
+        sim._sailfish_grid.clear()
+        for sf in sim.sailfish:
+            sim._sailfish_grid.insert(sf)
+
+        sf1._target_sardine = s1
+        sardines = sim._grid.query(sf2, cfg.radius_sailfish_awareness)
+        decision = sf2.query_hunting_target(sardines, baitball=None)
+        self.assertEqual(decision.kind, "isolated_target")
+        self.assertIs(decision.target, s2)
+
+    def test_query_hunting_target_prefers_orbit_for_dense_baitball(self):
+        from sim.sardine import Sardine
+        from sim.sailfish import Sailfish
+        from sim.simulation import _BaitballInfo
+
+        cfg = self._cfg(
+            sailfish_baitball_enabled=True,
+            sailfish_herding_enabled=True,
+            sailfish_herding_min_sailfish=1,
+            sailfish_baitball_density_threshold=0.10,
+            sailfish_target_decision_margin=0.05,
+        )
+        sim = Simulation(cfg)
+        sf = Sailfish(100.0, 100.0, 0.0, 0.0, cfg, sim._grid, sim._sailfish_grid)
+        sim.sailfish.append(sf)
+
+        # Visible sardines plus a high-density baitball near the fish.
+        sim.sardines.append(Sardine(130.0, 100.0, 0.0, 0.0, cfg, sim._grid, sim._sailfish_grid))
+        sim.sardines.append(Sardine(132.0, 102.0, 0.0, 0.0, cfg, sim._grid, sim._sailfish_grid))
+
+        sim._grid.clear()
+        for s in sim.sardines:
+            sim._grid.insert(s)
+
+        baitball = _BaitballInfo(
+            bid=1,
+            cx=131.0,
+            cy=101.0,
+            radius=18.0,
+            count=22,
+            density=0.45,
+        )
+        sf.set_baitball_context([baitball], 1, 0.0, 0)
+
+        sardines = sim._grid.query(sf, cfg.radius_sailfish_awareness)
+        decision = sf.query_hunting_target(sardines, baitball)
+        self.assertEqual(decision.kind, "baitball_orbit")
+
+
 # =============================================================================
 # WebGPU sardine backend tests
 # =============================================================================
@@ -5337,3 +5659,250 @@ class TestSardineGPUBackend(unittest.TestCase):
             spread_final, spread_initial,
             f"GPU sardines did not cluster: spread {spread_initial:.1f} → {spread_final:.1f}"
         )
+
+
+# =============================================================================
+# Sleep prevention (utils/sleep_prevention.py)
+# =============================================================================
+
+class TestSleepPrevention(unittest.TestCase):
+    """Tests for the platform sleep-prevention utility.
+
+    The tests verify the public contract without spawning real system processes.
+    All platform calls are mocked so the suite runs identically on every OS.
+    """
+
+    def setUp(self):
+        # Reset module-level state before each test so they are isolated.
+        import utils.sleep_prevention as sp
+        sp._caffeinate_proc = None
+        sp._win_active = False
+
+    def tearDown(self):
+        # Ensure any mock caffeinate processes are cleaned up.
+        import utils.sleep_prevention as sp
+        sp._caffeinate_proc = None
+        sp._win_active = False
+
+    # ── macOS path ────────────────────────────────────────────────────
+
+    @unittest.mock.patch("platform.system", return_value="Darwin")
+    def test_macos_enable_starts_caffeinate(self, _sys):
+        """enable_sleep_prevention on macOS spawns caffeinate and returns True."""
+        import utils.sleep_prevention as sp
+        mock_proc = unittest.mock.MagicMock()
+        mock_proc.poll.return_value = None
+        mock_proc.pid = 12345
+        with unittest.mock.patch("subprocess.Popen", return_value=mock_proc) as popen:
+            result = sp.enable_sleep_prevention()
+            popen.assert_called_once()
+            args = popen.call_args[0][0]
+            self.assertIn("caffeinate", args[0])
+        self.assertTrue(result)
+        self.assertIs(sp._caffeinate_proc, mock_proc)
+
+    @unittest.mock.patch("platform.system", return_value="Darwin")
+    def test_macos_enable_idempotent(self, _sys):
+        """Second enable_sleep_prevention call on macOS does not spawn a new process."""
+        import utils.sleep_prevention as sp
+        mock_proc = unittest.mock.MagicMock()
+        mock_proc.poll.return_value = None
+        mock_proc.pid = 9999
+        sp._caffeinate_proc = mock_proc
+        with unittest.mock.patch("subprocess.Popen") as popen:
+            result = sp.enable_sleep_prevention()
+            popen.assert_not_called()
+        self.assertTrue(result)
+
+    @unittest.mock.patch("platform.system", return_value="Darwin")
+    def test_macos_disable_terminates_caffeinate(self, _sys):
+        """disable_sleep_prevention terminates the caffeinate process."""
+        import utils.sleep_prevention as sp
+        mock_proc = unittest.mock.MagicMock()
+        mock_proc.poll.return_value = None
+        mock_proc.pid = 12345
+        sp._caffeinate_proc = mock_proc
+        sp.disable_sleep_prevention()
+        mock_proc.terminate.assert_called_once()
+        self.assertIsNone(sp._caffeinate_proc)
+
+    @unittest.mock.patch("platform.system", return_value="Darwin")
+    def test_macos_disable_without_enable_is_noop(self, _sys):
+        """disable_sleep_prevention with no active process does not crash."""
+        import utils.sleep_prevention as sp
+        sp._caffeinate_proc = None
+        # Should not raise.
+        sp.disable_sleep_prevention()
+
+    @unittest.mock.patch("platform.system", return_value="Darwin")
+    def test_macos_is_active_reflects_state(self, _sys):
+        """is_active() returns True only when caffeinate is running."""
+        import utils.sleep_prevention as sp
+        self.assertFalse(sp.is_active())
+        mock_proc = unittest.mock.MagicMock()
+        mock_proc.poll.return_value = None
+        sp._caffeinate_proc = mock_proc
+        self.assertTrue(sp.is_active())
+
+    @unittest.mock.patch("platform.system", return_value="Darwin")
+    def test_macos_enable_handles_missing_caffeinate(self, _sys):
+        """enable_sleep_prevention returns False gracefully if caffeinate is absent."""
+        import utils.sleep_prevention as sp
+        with unittest.mock.patch("subprocess.Popen", side_effect=FileNotFoundError):
+            result = sp.enable_sleep_prevention()
+        self.assertFalse(result)
+        self.assertIsNone(sp._caffeinate_proc)
+
+    @unittest.mock.patch("platform.system", return_value="Darwin")
+    def test_macos_double_disable_is_safe(self, _sys):
+        """Calling disable twice (after enable) does not crash."""
+        import utils.sleep_prevention as sp
+        mock_proc = unittest.mock.MagicMock()
+        mock_proc.poll.return_value = None
+        mock_proc.pid = 1
+        sp._caffeinate_proc = mock_proc
+        sp.disable_sleep_prevention()
+        sp.disable_sleep_prevention()  # second call: _caffeinate_proc is already None
+
+    # ── Windows path ──────────────────────────────────────────────────
+
+    @unittest.mock.patch("platform.system", return_value="Windows")
+    def test_windows_enable_calls_set_thread_execution_state(self, _sys):
+        """enable_sleep_prevention on Windows calls SetThreadExecutionState."""
+        import utils.sleep_prevention as sp
+        mock_ste = unittest.mock.MagicMock(return_value=1)
+        mock_windll = unittest.mock.MagicMock()
+        mock_windll.kernel32.SetThreadExecutionState = mock_ste
+        with unittest.mock.patch("ctypes.windll", mock_windll, create=True):
+            result = sp.enable_sleep_prevention()
+        self.assertTrue(result)
+        self.assertTrue(sp._win_active)
+        mock_ste.assert_called_once()
+
+    @unittest.mock.patch("platform.system", return_value="Windows")
+    def test_windows_disable_clears_execution_state(self, _sys):
+        """disable_sleep_prevention on Windows clears SetThreadExecutionState."""
+        import utils.sleep_prevention as sp
+        sp._win_active = True
+        mock_ste = unittest.mock.MagicMock(return_value=1)
+        mock_windll = unittest.mock.MagicMock()
+        mock_windll.kernel32.SetThreadExecutionState = mock_ste
+        with unittest.mock.patch("ctypes.windll", mock_windll, create=True):
+            sp.disable_sleep_prevention()
+        self.assertFalse(sp._win_active)
+        mock_ste.assert_called_once()
+
+    @unittest.mock.patch("platform.system", return_value="Windows")
+    def test_windows_enable_idempotent(self, _sys):
+        """Second enable call on Windows does not call SetThreadExecutionState again."""
+        import utils.sleep_prevention as sp
+        sp._win_active = True
+        mock_ste = unittest.mock.MagicMock()
+        mock_windll = unittest.mock.MagicMock()
+        mock_windll.kernel32.SetThreadExecutionState = mock_ste
+        with unittest.mock.patch("ctypes.windll", mock_windll, create=True):
+            result = sp.enable_sleep_prevention()
+        self.assertTrue(result)
+        mock_ste.assert_not_called()
+
+    # ── Linux / unknown platform ──────────────────────────────────────
+
+    @unittest.mock.patch("platform.system", return_value="Linux")
+    def test_linux_enable_returns_false_gracefully(self, _sys):
+        """enable_sleep_prevention on Linux returns False without raising."""
+        import utils.sleep_prevention as sp
+        result = sp.enable_sleep_prevention()
+        self.assertFalse(result)
+
+    @unittest.mock.patch("platform.system", return_value="Linux")
+    def test_linux_disable_is_noop(self, _sys):
+        """disable_sleep_prevention on Linux does not raise."""
+        import utils.sleep_prevention as sp
+        sp.disable_sleep_prevention()  # must not raise
+
+    @unittest.mock.patch("platform.system", return_value="Linux")
+    def test_linux_is_active_returns_false(self, _sys):
+        """is_active() returns False on Linux."""
+        import utils.sleep_prevention as sp
+        self.assertFalse(sp.is_active())
+
+    # ── Config field ──────────────────────────────────────────────────
+
+    def test_config_has_prevent_system_sleep_defaulting_true(self):
+        """SimConfig.prevent_system_sleep exists and defaults to True."""
+        from config.config import SimConfig
+        cfg = SimConfig()
+        self.assertTrue(cfg.prevent_system_sleep)
+
+    def test_config_prevent_system_sleep_can_be_disabled(self):
+        """SimConfig.prevent_system_sleep can be set to False via dataclasses.replace."""
+        import dataclasses
+        from config.config import SimConfig
+        cfg = dataclasses.replace(SimConfig(), prevent_system_sleep=False)
+        self.assertFalse(cfg.prevent_system_sleep)
+
+
+class _DummyShape:
+    """Minimal test double for pyglet shape objects."""
+
+    def __init__(self) -> None:
+        self.deleted = False
+        self.delete_calls = 0
+
+    def delete(self) -> None:
+        self.deleted = True
+        self.delete_calls += 1
+
+
+class TestRendererLifecycleCleanup(unittest.TestCase):
+    """Regression tests for stale renderer-cache cleanup.
+
+    These tests validate the central helper used to prune stale shape-cache
+    entries when update/draw cadence causes per-frame death side-channels to
+    be missed.
+    """
+
+    def test_prune_removed_shapes_deletes_stale_shape(self):
+        from rendering.renderer import _prune_removed_shapes
+
+        live_sid = 101
+        dead_sid = 202
+        live_shape = _DummyShape()
+        dead_shape = _DummyShape()
+        shape_map = {live_sid: live_shape, dead_sid: dead_shape}
+
+        removed = _prune_removed_shapes(shape_map, {live_sid})
+
+        self.assertEqual(removed, 1)
+        self.assertIn(live_sid, shape_map)
+        self.assertNotIn(dead_sid, shape_map)
+        self.assertFalse(live_shape.deleted)
+        self.assertTrue(dead_shape.deleted)
+        self.assertEqual(dead_shape.delete_calls, 1)
+
+    def test_prune_removed_shapes_prunes_extra_maps(self):
+        from rendering.renderer import _prune_removed_shapes
+
+        dead_sid = 55
+        shape_map = {dead_sid: _DummyShape()}
+        vel_map = {dead_sid: object()}
+
+        removed = _prune_removed_shapes(shape_map, set(), extra_maps=(vel_map,))
+
+        self.assertEqual(removed, 1)
+        self.assertNotIn(dead_sid, shape_map)
+        self.assertNotIn(dead_sid, vel_map)
+
+    def test_prune_removed_shapes_noop_when_all_live(self):
+        from rendering.renderer import _prune_removed_shapes
+
+        sid = 77
+        shape = _DummyShape()
+        shape_map = {sid: shape}
+
+        removed = _prune_removed_shapes(shape_map, {sid})
+
+        self.assertEqual(removed, 0)
+        self.assertIn(sid, shape_map)
+        self.assertFalse(shape.deleted)
+

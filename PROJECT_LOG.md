@@ -17,6 +17,194 @@ Use supporting files for detail:
 
 ## Log Maintenance (Chronological)
 
+- 2026-05-08: Full project cleanup, consistency pass, and documentation maintenance.
+  Why: follow-up after sailfish hunting refactor, ecology tightening, sleep-prevention addition, and starvation renderer fix to eliminate drift between config, UI, comments, and runtime behavior.
+  What changed:
+
+  1. **Two dead config fields tombstoned** — [config/config.py](config/config.py):
+     - `sailfish_baitball_edge_target_chance`: marked `# LEGACY / NOT READ`. Was the per-second probability for edge-target strikes; superseded by the `query_hunting_target()` scoring system (2026-05-08 refactor). Edge-target opportunities are now scored and compared against baitball pressure rather than rolled as independent per-frame probabilities.
+     - `sailfish_herding_slot_jitter`: marked `# LEGACY / NOT READ`. Was the angular slot jitter for the old herding system; superseded by `sailfish_baitball_slot_jitter` (BAITBALL ORBIT FORCE MODEL section). `_apply_herding_pressure()` never reads it.
+     Both fields are retained in the dataclass for backward JSON compatibility. Both were already present as silently-ignored values in `boids_overrides.json`.
+
+  2. **Cross-reference comment corrected** — [config/config.py](config/config.py): the `sailfish_baitball_strike_chance` LEGACY tombstone comment previously cited `sailfish_baitball_edge_target_chance` as the "active replacement"; updated to accurately describe the current replacement (scoring system + `sailfish_baitball_center_strike_chance`).
+
+  3. **Stale internal comment removed** — [sim/simulation.py](sim/simulation.py): `sardine.age += dt` comment said "Stage 8.6 for max age death" — a planned-but-never-implemented feature. Replaced with an accurate description of what the age field is actually used for.
+
+  4. **Dead menu row annotated** — [config/config_menu.py](config/config_menu.py): added a note above the `sailfish_baitball_edge_target_chance` menu row explaining it has no behavioral effect.
+
+  5. **PROJECT_LOG.md Section 3 (Current Behavior / Rendering)** updated to mention the renderer reconciliation safety-net added in the Phase 5 starvation fix.
+
+  6. **PROJECT_LOG.md Section 5 (Config and UI)** corrected: section count updated from 8 to 10; removed the nonexistent "SAILFISH — BAITBALL" section; added DEBUG VISUALIZATION, PERFORMANCE, and POWER MANAGEMENT sections; updated SAILFISH — HUNTING description to reflect that baitball/orbit/strike/scoring rows are now inside that section.
+
+  No behavioral changes. Verification:
+  - Full suite: `./.conda/bin/python -m tests.tests` → **268/268 pass**.
+  - Bench: `./.conda/bin/python -m tests.bench --scenario worst_case --frames 120 --warmup 40 --verbose` → **39.59 ms avg**.
+
+- 2026-05-08: Frozen starved-fish sprites fix (renderer lifecycle reconciliation).  
+  Why: occasionally, fish that had already starved in simulation remained visible as frozen triangles until a manual population change triggered `renderer.reset()`.  
+  Root cause:
+
+  1. Simulation death/birth side-channels (`_sardines_starved_ids`, `_sardines_eaten_ids`, `_sailfish_died_ids`, `_algae_eaten_ids`, `_..._born`) are cleared at the **start** of each `update()` call in [sim/simulation.py](sim/simulation.py).
+  2. When pyglet executes multiple `update()` ticks before one `on_draw` (frame hitch, event-loop jitter, resize/fullscreen transitions, etc.), renderer can miss a prior tick's death ids because they are cleared by the next tick before `Renderer.draw()` consumes them.
+  3. Result: stale shapes survive in renderer maps/lists even though boids were removed from simulation lists.
+  4. Manual add/remove appears to "fix" it because [main.py](main.py) explicitly calls `renderer.reset(...)` after those UI actions, fully rebuilding shape maps from live simulation lists and dropping stale orphan shapes.
+
+  What changed:
+
+  1. **Central stale-cache cleanup helper** — [rendering/renderer.py](rendering/renderer.py): added `_prune_removed_shapes(shape_map, live_ids, extra_maps=...)`.
+    - Deletes stale shapes immediately (`shape.delete()`).
+    - Removes stale ids from associated side maps (e.g. sardine velocity-state map).
+    - Used as centralized cleanup path for starvation/eating/manual mismatch recovery.
+
+  2. **Renderer reconciliation safety-net** — [rendering/renderer.py](rendering/renderer.py), inside `Renderer.draw(...)`:
+    - For sardines, sailfish, and algae: if `len(shape_map) != len(live_list)`, reconcile against authoritative live ids from simulation.
+    - Prune stale cached shapes and lazily allocate missing shapes.
+    - Rebuild ordered draw lists from live simulation order after reconciliation.
+    - This runs only on mismatch (not every frame), so normal-path performance remains unchanged.
+
+  3. **Regression tests** — [tests/tests.py](tests/tests.py): added `TestRendererLifecycleCleanup` (3 tests) validating stale-shape pruning behavior and side-map cleanup.
+
+  Verification:
+  - Targeted tests: `python3 -m unittest tests.tests.TestRendererLifecycleCleanup` → **3/3 pass**.
+  - Full suite: `python3 -m unittest tests.tests` → **310/310 pass** (4 skipped).
+  - Perf sanity: `python -m tests.bench --scenario worst_case --frames 120 --warmup 40 --verbose` → **39.30 ms avg**, in family with prior worst-case numbers; no measurable regression attributable to the mismatch-only reconciliation guard.
+
+  Remaining lifecycle risk:
+  - The underlying side-channel-clear-at-update-start model still exists; renderer reconciliation now hardens correctness when draw cadence lags. A future deeper cleanup could move to explicit "consumed by renderer" queues, but current fix is minimal, architecture-preserving, and robust in observed scenarios.
+
+- 2026-05-08: Sleep prevention — prevent host from sleeping while simulation is open.  
+  Why: long observation sessions cause the display to dim/sleep mid-run; wanted a one-time, clean-lifecycle solution with no frame-timing cost.  
+  What changed:
+
+  1. **New module** — [utils/sleep_prevention.py](utils/sleep_prevention.py):
+     - `enable_sleep_prevention() → bool` — starts prevention; returns `True` on success.
+     - `disable_sleep_prevention()` — releases the assertion/process cleanly.
+     - `is_active() → bool` — query current state.
+     - **macOS**: spawns a single persistent `caffeinate -d -i -m` subprocess (display sleep, idle sleep, disk sleep inhibited). Subprocess is started once at app launch and `terminate()`d on close. Falls back gracefully if `caffeinate` is absent.
+     - **Windows**: calls `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)` at enable; `SetThreadExecutionState(ES_CONTINUOUS)` at disable.
+     - **Linux**: not supported; logs a warning and returns `False` from `enable`.
+     - All calls are idempotent; `disable` without a prior `enable` is a no-op.
+     - Module-level state (`_caffeinate_proc`, `_win_active`) means zero per-frame cost.
+
+  2. **Config field** — [config/config.py](config/config.py): `prevent_system_sleep: bool = True` added in a new POWER MANAGEMENT section after `sardine_use_gpu`. Disabling gives back OS idle policy (useful for unattended/headless runs).
+
+  3. **Config menu** — [config/config_menu.py](config/config_menu.py): new `_GroupRow("POWER MANAGEMENT")` section with `_ToggleItem("Prevent sleep", "prevent_system_sleep")` appended before `_SaveRow()`.
+
+  4. **Runtime override** — [boids_overrides.json](boids_overrides.json): `"prevent_system_sleep": true` added as master runtime default.
+
+  5. **main.py lifecycle integration** — [main.py](main.py):
+     - `from utils import sleep_prevention` import added.
+     - After config load: `if config.prevent_system_sleep: sleep_prevention.enable_sleep_prevention()` (single call at startup; logs success/failure via `logging`).
+     - `on_close` event handler added to call `sleep_prevention.disable_sleep_prevention()` then `window.close()`.
+     - `pyglet.app.run()` wrapped in `try/finally` — `disable_sleep_prevention()` also called in the `finally` block as a belt-and-suspenders release in case of exception or signal exit (second call is a no-op if already disabled via `on_close`).
+
+  Platform support:
+  - macOS: caffeinate, standard since OS X 10.8
+  - Windows: SetThreadExecutionState via ctypes
+  - Linux: not supported; fails silently with warning log
+
+  Limitations:
+  - Toggle in the config menu changes the *stored* config value for future launches but does not enable/disable prevention mid-run (would require calling enable/disable from `apply_config`). Current behavior: state is set once at startup. For now this is the intended design.
+  - Linux could be supported via `systemd-inhibit` or `org.freedesktop.PowerManagement` D-Bus, but is deferred.
+
+  Verification:
+  - Unit tests: **307/307 pass** (`python3 -m unittest tests.tests`, 4 skipped).  
+    New test class `TestSleepPrevention` (18 tests) covers: macOS enable/disable/idempotent/graceful-failure/is_active, Windows enable/disable/idempotent, Linux no-op, config field existence and override.
+  - No runaway subprocess: the `finally` block and the `on_close` handler both terminate caffeinate; the idempotent guard prevents double-terminate.
+  - Frame timing unaffected: `enable`/`disable` are called once at startup/shutdown only; no per-frame work added.
+
+- 2026-05-08: Sailfish smart target-decision layer (FSM-preserving refactor).  
+  Why: hunting needed a dedicated target-query/scoring layer without overloading ecology eating; orbit baitball eating remains intentionally allowed as active cooperative hunting.  
+  What changed:
+
+  1. **`query_first` fixed to true nearest** — [sim/spatial_hash.py](sim/spatial_hash.py): `query_first()` now scans local candidate cells and returns the closest sardine within radius (not first cell-order hit). Kept simple and grid-local for ecology eating.
+
+  2. **New hunting decision query function** — [sim/sailfish.py](sim/sailfish.py): added `query_hunting_target(sardines, baitball) -> _HuntingDecision` with explicit outcomes:
+    - `isolated_target`
+    - `baitball_orbit`
+    - `baitball_strike`
+    - `track_com`
+    - `no_target`
+
+    The scorer is local/grid-based and uses: sailfish distance, school-COM isolation, baitball-edge position, sardine speed vulnerability, hunger aggression, and shared-target penalty (nearby sailfish already locking same sardine). Baitball scoring uses edge distance, density, radius, cooperative availability, group cooldown pressure, and hunger.
+
+  3. **FSM integration at decision points** — [sim/sailfish.py](sim/sailfish.py): `TRACK_SCHOOL`, `ORBIT_BAITBALL`, and `TARGET_LOCK` now consult `query_hunting_target()` for transition/target choice. Existing FSM states and timers/caps are preserved (group cooldown, orbit patience, simultaneous attacker caps, strike cooldowns).
+
+  4. **Orbit eating enabled by gate** — [sim/simulation.py](sim/simulation.py): sailfish eating gate now allows `orbit_baitball` again (`track_school`, `orbit_baitball`, `target_lock`, `burst_attack`, `baitball_strike` allowed). `query_first` remains the one-kill nearest eater. PATROL/RECOVER still blocked.
+
+  5. **Decision diagnostics counters** — [sim/simulation.py](sim/simulation.py): added cumulative counters:
+    - `stats_target_decision_isolated`
+    - `stats_target_decision_baitball_orbit`
+    - `stats_target_decision_baitball_strike`
+    - `stats_target_decision_track_com`
+    - `stats_target_decision_none`
+    These aggregate per-frame sailfish decision categories for tuning and benchmarks.
+
+  6. **Config + menu tuning knobs (conservative)** — [config/config.py](config/config.py), [config/config_menu.py](config/config_menu.py), [boids_overrides.json](boids_overrides.json):
+    - `sailfish_target_edge_weight`
+    - `sailfish_target_hunger_weight`
+    - `sailfish_target_shared_penalty_weight`
+    - `sailfish_target_decision_margin`
+    - `sailfish_baitball_score_edge_weight`
+    - `sailfish_baitball_score_density_weight`
+    - `sailfish_baitball_score_radius_weight`
+    - `sailfish_baitball_score_coop_weight`
+
+  7. **Tests + benchmark updates**:
+    - [tests/tests.py](tests/tests.py):
+     - added nearest-neighbor regression test for `query_first`
+     - deduplicated accidentally duplicated per-state gate class
+     - updated gate expectations for ORBIT_BAITBALL-eating-allowed
+     - added `TestSailfishTargetDecision` for shared-target penalty and baitball-orbit preference
+    - [tests/bench.py](tests/bench.py): added target-decision scenarios and verbose decision-count output (`target_dense_one`, `target_two_baitballs`, `target_scattered`, `target_mixed`), plus CSV columns for decision counts.
+
+  Verification:
+  - Unit tests: **292/292 pass** (`python -m unittest tests.tests`, 4 skipped).
+  - Bench sample (120 frames + 40 warmup, headless):
+   - `target_dense_one`: 10.35 ms avg, decisions orbit=1200
+   - `target_two_baitballs`: 15.61 ms avg, decisions orbit=1440
+   - `target_scattered`: 14.33 ms avg, decisions isolated=709, orbit=271, none=220
+   - `target_mixed`: 13.02 ms avg, decisions orbit=1440
+   - `worst_case`: 37.58 ms avg (close to prior logged 38.01 ms baseline; no material regression observed)
+
+  Follow-up tuning note: dense scenarios currently bias heavily to orbit (few/no strikes in short runs). If desired, tune `sailfish_target_decision_margin`, `sailfish_baitball_score_density_weight`, and strike chances to increase edge-lock/strike frequency without collapsing into all-fish simultaneous attacks.
+
+- 2026-05-08: Medium-fidelity ecology tightening (5 code changes, 15 new tests).  
+  Why: follow-up to the sailfish hunting analysis that identified config defects and a state-independent eating hole.  
+  What changed:
+
+  1. **Duplicate config field removed** — [config/config.py](config/config.py): the second declaration of `sailfish_target_lock_suppressed_near_baitball` (in the BAITBALL DETECTION section, ~line 513) was deleted. The canonical declaration in the INDIVIDUAL TARGET LOCK section (~line 365) is kept. No behavioral change; Python was silently keeping the last (identical) declaration.
+
+  2. **Dead field tombstoned** — `sailfish_baitball_strike_chance` in [config/config.py](config/config.py) now carries a `# LEGACY / NOT READ` comment block explaining it was superseded by `sailfish_baitball_center_strike_chance`. Field is retained (value `0.08`) for JSON backward compatibility only; a test at [tests/tests.py](tests/tests.py) line ≈4953 still passes it as a config override. No code reads it.
+
+  3. **`_select_active_baitball` now ranks by edge distance** — [sim/sailfish.py](sim/sailfish.py): replaced center-distance-squared ranking (`best_d2`) with true edge distance `math.sqrt(dx*dx+dy*dy) - b.radius` tracked as `best_edge_dist`. A large distant baitball whose edge is farther than a smaller close baitball will no longer win the selection.
+
+  4. **`_should_take_individual_target` dead branch clarified** — [sim/sailfish.py](sim/sailfish.py): the final `return self._orbit_timer >= self._orbit_patience_goal` was always `False` in TRACK_SCHOOL (orbit timer not incremented there). Replaced with explicit `return False` and a multi-line comment explaining the invariant and why this branch is only reached in edge cases where the orbit redirect was skipped.
+
+  5. **Per-state eating gate** — [sim/simulation.py](sim/simulation.py): the ecology eating pass now only allows kills when the sailfish is in `{"track_school", "target_lock", "burst_attack", "baitball_strike"}`. PATROL, RECOVER, and ORBIT_BAITBALL are excluded. Gate is defined as `_EATING_STATES: frozenset[str]` local to the pass (no module-level constant added). New `stats_eat_blocked_by_state: int = 0` diagnostic counter on `Simulation` (with docstring) tracks blocked attempts for starvation monitoring.
+
+  Test changes: [tests/tests.py](tests/tests.py) — `test_stats_sardines_eaten_cumulative` updated: added `sailfish_burst_trigger_radius=0.0` to keep sailfish in TARGET_LOCK across both frames (without this, frame 2 has sf in RECOVER after the burst, blocking the second eat). New class `TestSailfishPerStateEatingGate` (7 tests) covers: PATROL blocks eating + counter increments, RECOVER blocks eating, TRACK_SCHOOL allows eating, BURST_ATTACK allows eating, counter starts at zero, counter not incremented on successful eat.
+
+  Test count: **288 / 288 pass** (was 281 before this session; 7 net new tests).  
+  Performance: frozenset lookup is O(1) per sailfish per ecology tick — negligible at all observed population sizes.
+
+- 2026-05-08: Sailfish hunting behavior deep analysis (analysis only — no code changed).  
+  Why: requested review of all sailfish detection, targeting, attack, eating, ecology, and interaction systems before any further behavioral changes.  
+  Key findings:
+  1. **Duplicate config field** — `sailfish_target_lock_suppressed_near_baitball` is declared twice in [config/config.py](config/config.py) (lines 365 and 513). Python keeps the last definition; no behavioral effect currently but a maintenance hazard.
+  2. **Dead legacy field** — `sailfish_baitball_strike_chance` is documented as superseded but still present in the dataclass. No code reads it.
+  3. **Eating is state-independent** — `query_first(sf, eat_r=25px)` runs on every sailfish every ecology tick regardless of FSM state (PATROL, RECOVER, etc.). A PATROL sailfish can eat and reset its hunger timer without entering the hunting sequence. This weakens starvation pressure.
+  4. **`query_first` is not nearest-first** — returns the first sardine found in hash cell order, not necessarily the closest within `eat_r`.
+  5. **`_select_active_baitball` ignores baitball radius** — prefers nearest center, not nearest edge. A large distant baitball can be ranked above a small close one even when its edge is farther away.
+  6. **Dead suppression branch in `_should_take_individual_target`** — final `return self._orbit_timer >= self._orbit_patience_goal` is never True in TRACK_SCHOOL (orbit timer not incremented there), making individual lock always suppressed when baitball+herding conditions are met. No behavioral bug because `_should_enter_orbit_baitball` redirects to ORBIT first, but the intent is misleading.
+  7. **One-frame force double-application in RECOVER → ORBIT_BAITBALL** — the COM steer and `_apply_herding_pressure` both run on the transition frame. Benign but architecturally messy.
+  8. **Mouse predator**: operates entirely independently of sailfish FSM (fleet force on sardine flee pass only). Mouse disrupting a baitball can cause orbit sailfish to fall back to TRACK_SCHOOL — an appropriate emergent interaction.
+  9. **`boids_overrides.json` merge threshold drift** — config.py defaults for `sailfish_baitball_merge_distance_multiplier` (0.8) and `sailfish_baitball_merge_overlap_threshold` (0.2) appear to have been tuned down from the original 1.2/0.55 values noted in the 2026-05-07 log entry. Verify both files are synchronized.
+  10. **Performance**: sailfish FSM cost is not a bottleneck (0.87–0.93 ms/frame at 12–15 fish). All proposed fixes are safe for real-time.
+
+  Recommended next phase: ecology tightening (fix duplicate field, annotate dead field, add per-state eating gate) then validate with a steady-state population benchmark before attempting behavioral changes like hunger-modulated aggression.  
+  No code changed. Full analysis in conversation log.
+
 - 2026-05-08: WebGPU sardine compute backend (wgpu-py / WGSL / Metal).  
   Why: CPU sardine force pass still dominated all high-population scenarios (14–25 ms/frame). WebGPU compute shaders on the Apple M5 Metal backend proved 5–9× faster than the Python numpy cell-bucket loop for sardine flocking forces, reducing worst_case from 40 ms to 16.5 ms.  
   What changed:
@@ -328,7 +516,7 @@ Real-time 2D ecosystem simulation of sardine schooling, sailfish predation, and 
 
 Runtime and validation:
 - Run: `python main.py`
-- Tests: `python -m unittest tests.tests` (273 tests)
+- Tests: `python -m unittest tests.tests` (310 tests)
 - Benchmarks: `python -m tests.bench`
 
 Core capabilities:
@@ -395,6 +583,7 @@ Rendering:
 - Single batch for fish/algae shapes.
 - HUD + optional population graph overlays.
 - Sardine color transition resets are handled to avoid stale-color carryover.
+- Renderer reconciliation safety-net detects and prunes stale cached shapes on count mismatch (no normal-path cost).
 
 ---
 
@@ -425,11 +614,13 @@ Migration behavior:
 ## 5) Config and UI (Current)
 
 Runtime menu:
-- Data rows across 8 sections + Save row.
-- Sections: SARDINES, MOUSE PREDATOR, SAILFISH — FLOCKING, SAILFISH — HUNTING, SAILFISH — BURST, SAILFISH — BAITBALL, ALGAE, ECOLOGY.
-- SAILFISH — HUNTING: Predict time (`sailfish_prediction_time`), No-sar timeout (`sailfish_no_sardines_timeout`).
-- SAILFISH — BURST: Recovery dur (`sailfish_recovery_duration`).
-- SAILFISH — BAITBALL: all baitball detection, herding, and strike config fields.
+- Data rows across 10 sections + Save row.
+- Sections: SARDINES, MOUSE PREDATOR, SAILFISH — FLOCKING, SAILFISH — HUNTING, SAILFISH — BURST, ALGAE, ECOLOGY, DEBUG VISUALIZATION, PERFORMANCE, POWER MANAGEMENT.
+- SAILFISH — HUNTING: all pursuit, targeting, baitball detection/orbit/strike scoring, lateralization, orbit variation, proto-collaboration, anchor, attack suppression, and inter-sailfish spacing fields.
+- SAILFISH — BURST: burst trigger/duration/cooldown, speed/force multipliers, recovery duration.
+- DEBUG VISUALIZATION: master toggle + per-layer sub-toggles for all debug overlays.
+- PERFORMANCE: frame timing HUD toggle, baitball detect interval, GPU sardine forces toggle.
+- POWER MANAGEMENT: prevent system sleep toggle.
 - Visible rows: 16, with scrolling indicators.
 
 Sardine color controls in menu:

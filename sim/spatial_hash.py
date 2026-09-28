@@ -294,11 +294,10 @@ class SpatialHash:
         return results if results else _EMPTY_LIST
 
     def query_first(self, agent: "Boid", radius: float) -> "Boid | None":
-        """Return the first neighbour within *radius*, or ``None``.
+        """Return the nearest neighbour within *radius*, or ``None``.
 
-        Stops as soon as one qualifying neighbour is found — avoids building
-        a full result list when only the first match is needed (e.g. the
-        sailfish one-kill-per-tick ecology pass).
+        Kept intentionally simple for ecology eating checks: one radius query
+        and one nearest-distance comparison pass over candidate cells.
 
         Applies the same fast-path / slow-path split as ``query()``.
         """
@@ -318,6 +317,8 @@ class SpatialHash:
         row_c = int(ay // cs)
 
         cells_get = self._cells.get
+        best = None
+        best_d2 = r2
 
         if nc > 2 * span and nr > 2 * span:
             for dc in range(-span, span + 1):
@@ -335,8 +336,10 @@ class SpatialHash:
                         elif dx < -hw: dx += W
                         if dy > hh:    dy -= H
                         elif dy < -hh: dy += H
-                        if dx * dx + dy * dy <= r2:
-                            return other
+                        d2 = dx * dx + dy * dy
+                        if d2 <= best_d2:
+                            best_d2 = d2
+                            best = other
         else:
             visited: set[tuple[int, int]] = set()
             for dc in range(-span, span + 1):
@@ -358,9 +361,11 @@ class SpatialHash:
                         elif dx < -hw: dx += W
                         if dy > hh:    dy -= H
                         elif dy < -hh: dy += H
-                        if dx * dx + dy * dy <= r2:
-                            return other
-        return None
+                        d2 = dx * dx + dy * dy
+                        if d2 <= best_d2:
+                            best_d2 = d2
+                            best = other
+        return best
 
     def _candidate_cells(
         self, x: float, y: float, radius: float

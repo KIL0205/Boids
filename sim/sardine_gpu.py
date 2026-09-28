@@ -74,32 +74,32 @@ _WGSL: str = r"""
 // Noise is intentionally omitted — the CPU adds it after reading back results.
 
 struct Params {
-    // --- offset  0: 4 × u32 (16 bytes) ---
+    // --- offset  0: 4 x u32 (16 bytes) ---
     n:               u32,   // active sardine count
     nc:              u32,   // grid columns
     nr:              u32,   // grid rows
     coh_span:        u32,   // cell radius of neighbourhood (usually 1)
-    // --- offset 16: 4 × f32 (16 bytes) ---
+    // --- offset 16: 4 x f32 (16 bytes) ---
     W:               f32,   // world width  (pixels)
     H:               f32,   // world height (pixels)
     cell_size:       f32,   // spatial-hash cell side (pixels)
     sep_r2:          f32,   // separation radius²
-    // --- offset 32: 4 × f32 (16 bytes) ---
+    // --- offset 32: 4 x f32 (16 bytes) ---
     ali_r2:          f32,   // alignment radius²
     coh_r2:          f32,   // cohesion radius²
     flee_r2:         f32,   // flee-from-sailfish radius²
     max_speed:       f32,   // sardine max speed
-    // --- offset 48: 4 × f32 (16 bytes) ---
+    // --- offset 48: 4 x f32 (16 bytes) ---
     max_force:       f32,   // sardine max steering force
     w_sep:           f32,   // weight_separation
     w_ali:           f32,   // weight_alignment
     w_coh:           f32,   // weight_cohesion
-    // --- offset 64: 1 × f32 + 1 × u32 + 2 × f32 (16 bytes) ---
+    // --- offset 64: 1 x f32 + 1 x u32 + 2 x f32 (16 bytes) ---
     w_flee:          f32,   // weight_flee
     n_sailfish:      u32,   // active sailfish count (capped to _MAX_SAILFISH)
     mouse_x:         f32,   // mouse predator x
     mouse_y:         f32,   // mouse predator y
-    // --- offset 80: 2 × f32 + 2 × u32 (16 bytes) ---
+    // --- offset 80: 2 x f32 + 2 x u32 (16 bytes) ---
     mouse_r2:        f32,   // mouse predator radius²
     mouse_flee_w:    f32,   // mouse flee weight multiplier
     mouse_active:    u32,   // 1 = mouse predator active, 0 = inactive

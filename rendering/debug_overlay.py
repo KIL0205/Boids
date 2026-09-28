@@ -14,7 +14,7 @@ flag is False the ``draw()`` method returns after a single branch check.
 Exposed visuals (each individually toggled in SimConfig):
   1. Baitball shading    — translucent filled circle + center dot per baitball.
   2. Baitball labels     — sardine count / density / radius text near center.
-  3. SF–BB links         — line from each sailfish to its baitball (color
+  3. SF-BB links         — line from each sailfish to its baitball (color
                            varies by state: orbit=cyan-dim, strike-ready=cyan,
                            active-strike=yellow).
   4. Orbit slot markers  — cross + stub line showing each sailfish's assigned

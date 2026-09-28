@@ -64,6 +64,7 @@ from __future__ import annotations
 import logging
 import math
 import random
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -80,6 +81,21 @@ if TYPE_CHECKING:
 logging.getLogger("transitions").setLevel(logging.WARNING)
 
 _EPS2: float = 1e-18  # division-by-zero guard in separation force
+
+_DECISION_ISOLATED: str = "isolated_target"
+_DECISION_ORBIT: str = "baitball_orbit"
+_DECISION_STRIKE: str = "baitball_strike"
+_DECISION_COM: str = "track_com"
+_DECISION_NONE: str = "no_target"
+
+
+@dataclass(frozen=True)
+class _HuntingDecision:
+    """Structured output from query_hunting_target()."""
+
+    kind: str
+    target: object | None = None
+    baitball: "_BaitballInfo | None" = None
 
 
 class Sailfish(Boid):
@@ -336,6 +352,11 @@ class Sailfish(Boid):
         self.debug_orbit_slot_x: float = -1.0
         self.debug_orbit_slot_y: float = -1.0
 
+        # Last hunting-target decision category made this frame.
+        # One of: isolated_target, baitball_orbit, baitball_strike,
+        # track_com, no_target.
+        self.debug_last_target_decision: str = _DECISION_NONE
+
     # ------------------------------------------------------------------ #
     # External context                                                      #
     # ------------------------------------------------------------------ #
@@ -393,6 +414,7 @@ class Sailfish(Boid):
         self._is_herding = False
         self.debug_orbit_slot_x = -1.0
         self.debug_orbit_slot_y = -1.0
+        self.debug_last_target_decision = _DECISION_NONE
         baitball = self._select_active_baitball(dt)
 
         # ── 1. Validate individual target ─────────────────────────────
@@ -430,53 +452,29 @@ class Sailfish(Boid):
                 self._no_sardines_timer += dt
             else:
                 self._no_sardines_timer = 0.0
-                n = len(sardines)
-                acq_r2 = cfg.sailfish_target_acquire_radius ** 2
-                cx = cy = 0.0
-                candidates: list = []
-                for s in sardines:
-                    dx = s._gx - px
-                    dy = s._gy - py
-                    if dx > hw:
-                        dx -= W
-                    elif dx < -hw:
-                        dx += W
-                    if dy > hh:
-                        dy -= H
-                    elif dy < -hh:
-                        dy += H
-                    cx += dx
-                    cy += dy
-                    d2 = dx * dx + dy * dy
-                    if d2 < acq_r2:
-                        candidates.append((dx, dy, d2, s))
+                decision = self.query_hunting_target(sardines, baitball)
+                self.debug_last_target_decision = decision.kind
 
-                com_x = cx / n
-                com_y = cy / n
-
-                if self._should_enter_orbit_baitball(baitball):
+                if decision.kind == _DECISION_ORBIT and decision.baitball is not None:
                     self.sm_to_orbit_baitball()
                     self._arm_orbit_patience()
                     state = self.state
+                    baitball = decision.baitball
+                elif decision.kind == _DECISION_ISOLATED and decision.target is not None:
+                    self._target_sardine = decision.target
+                    self._target_lock_timer = cfg.sailfish_target_lock_time
+                    tgt = decision.target
+                    self.sm_to_target_lock()
+                    state = self.state
+                else:
+                    com_x, com_y = self._local_school_com(sardines, px, py)
+                    self._steer_apply_xy(com_x, com_y, cfg.weight_pursuit)
+                    if len(sardines) >= cfg.sailfish_school_pressure_density_threshold:
+                        self._apply_school_pressure(com_x, com_y)
 
-                if state == "track_school":
-                    lock_allowed = self._should_take_individual_target(baitball)
-                    if candidates and lock_allowed:
-                        best_s = self._select_target(
-                            candidates, sardines, cx, cy, n, acq_r2, cfg
-                        )
-                        self._target_sardine = best_s
-                        self._target_lock_timer = cfg.sailfish_target_lock_time
-                        tgt = best_s
-                        self.sm_to_target_lock()
-                        state = self.state
-                    else:
-                        self._steer_apply_xy(com_x, com_y, cfg.weight_pursuit)
-                        if n >= cfg.sailfish_school_pressure_density_threshold:
-                            self._apply_school_pressure(com_x, com_y)
-                    # Herding pressure supplements pursuit for all sailfish when
-                    # a baitball is active, not only those skipping target-lock.
-                    self._apply_herding_pressure(baitball, px, py)
+                # Herding pressure supplements pursuit when a baitball exists,
+                # including frames where this fish is still in TRACK_SCHOOL.
+                self._apply_herding_pressure(baitball, px, py)
 
         if state == "orbit_baitball":
             if baitball is None or not has_sardines:
@@ -489,68 +487,46 @@ class Sailfish(Boid):
                 self._no_sardines_timer = 0.0
                 self._orbit_timer += dt
 
-                n = len(sardines)
-                cx = cy = 0.0
-                for s in sardines:
-                    dx = s._gx - px
-                    dy = s._gy - py
-                    if dx > hw:
-                        dx -= W
-                    elif dx < -hw:
-                        dx += W
-                    if dy > hh:
-                        dy -= H
-                    elif dy < -hh:
-                        dy += H
-                    cx += dx
-                    cy += dy
-                com_x = cx / n
-                com_y = cy / n
+                com_x, com_y = self._local_school_com(sardines, px, py)
                 # Keep loose school COM bias while orbiting to avoid drift.
                 self._steer_apply_xy(com_x, com_y, cfg.weight_pursuit * 0.35)
                 self._apply_herding_pressure(baitball, px, py)
 
-                if self._orbit_timer >= self._orbit_patience_goal:
-                    if self._should_start_baitball_strike(baitball):
-                        self._begin_baitball_strike(baitball, px, py)
-                        self.sm_to_baitball_strike()
-                        self._mark_group_strike("center")
+                decision = self.query_hunting_target(sardines, baitball)
+                self.debug_last_target_decision = decision.kind
+                if decision.kind == _DECISION_STRIKE and baitball is not None:
+                    self._begin_baitball_strike(baitball, px, py)
+                    self.sm_to_baitball_strike()
+                    self._mark_group_strike("center")
+                    state = self.state
+                elif decision.kind == _DECISION_ISOLATED and decision.target is not None:
+                    if (
+                        self._group_strike_cooldown_timer <= 0.0
+                        and self._baitball_strike_cooldown_timer <= 0.0
+                        and self._individual_strike_cooldown <= 0.0
+                        and self._active_baitball_strikes < cfg.sailfish_max_simultaneous_baitball_strikes
+                    ):
+                        self._target_sardine = decision.target
+                        self._target_lock_timer = cfg.sailfish_target_lock_time
+                        self.sm_orbit_to_target_lock()
+                        self._mark_group_strike("edge")
                         state = self.state
-                    else:
-                        edge_target = self._select_edge_target(sardines, baitball)
-                        if (
-                            edge_target is not None
-                            and self._group_strike_cooldown_timer <= 0.0
-                            and self._baitball_strike_cooldown_timer <= 0.0
-                            and self._individual_strike_cooldown <= 0.0
-                            and self._active_baitball_strikes < cfg.sailfish_max_simultaneous_baitball_strikes
-                        ):
-                            chance = max(
-                                0.0,
-                                min(1.0, cfg.sailfish_baitball_edge_target_chance),
-                            )
-                            frame_p = 1.0 - ((1.0 - chance) ** max(self._dt, 0.0))
-                            if random.random() < frame_p:
-                                self._target_sardine = edge_target
-                                self._target_lock_timer = cfg.sailfish_target_lock_time
-                                self.sm_orbit_to_target_lock()
-                                self._mark_group_strike("edge")
-                                state = self.state
 
         if state in ("target_lock", "burst_attack"):
             if (
                 state == "target_lock"
                 and baitball is not None
-                and cfg.sailfish_target_lock_suppressed_near_baitball
-                and tgt is not None
-                and not self._is_target_on_baitball_edge(tgt, baitball)
+                and has_sardines
             ):
-                self._target_sardine = None
-                self._target_lock_timer = 0.0
-                self.sm_to_orbit_baitball()
-                self._arm_orbit_patience()
-                state = self.state
-                tgt = None
+                decision = self.query_hunting_target(sardines, baitball)
+                self.debug_last_target_decision = decision.kind
+                if decision.kind == _DECISION_ORBIT:
+                    self._target_sardine = None
+                    self._target_lock_timer = 0.0
+                    self.sm_to_orbit_baitball()
+                    self._arm_orbit_patience()
+                    state = self.state
+                    tgt = None
 
         if state in ("target_lock", "burst_attack"):
             if tgt is None:
@@ -726,70 +702,229 @@ class Sailfish(Boid):
     # Private helpers                                                      #
     # ------------------------------------------------------------------ #
 
-    def _select_target(
+    def _local_school_com(
         self,
-        candidates: list,
         sardines: list,
-        cx: float,
-        cy: float,
-        n: int,
-        acq_r2: float,
-        cfg: SimConfig,
-    ) -> "object":
-        """Pick the most vulnerable sardine from ``candidates``.
+        px: float,
+        py: float,
+    ) -> tuple[float, float]:
+        """Return local sardine COM as a toroidal-relative vector from self."""
+        cx = cy = 0.0
+        for s in sardines:
+            dx = s._gx - px
+            dy = s._gy - py
+            if dx > self._hw:
+                dx -= self._W
+            elif dx < -self._hw:
+                dx += self._W
+            if dy > self._hh:
+                dy -= self._H
+            elif dy < -self._hh:
+                dy += self._H
+            cx += dx
+            cy += dy
+        inv_n = 1.0 / max(1, len(sardines))
+        return cx * inv_n, cy * inv_n
 
-        Vulnerability scoring (Phase 3 logic, preserved):
-          proximity  -- closer sardines are easier to intercept.
-          isolation  -- sardines far from the local school COM are exposed.
-          slowness   -- slower sardines are harder to escape.
+    def _hunger_aggression(self) -> float:
+        """Return hunger-driven aggression in [0, 1]."""
+        starve_t = max(1e-6, float(self._config.sailfish_starvation_time))
+        return max(0.0, min(1.0, float(self.hunger_timer) / starve_t))
 
-        Also applies shared-target reduction: when a nearby sailfish already
-        holds the best candidate and an alternative exists, prefer the
-        alternative.
+    def query_hunting_target(
+        self,
+        sardines: list,
+        baitball: "_BaitballInfo | None",
+    ) -> _HuntingDecision:
+        """Score local options and return one structured hunting decision.
+
+        This function is intentionally separate from SpatialHash.query_first(),
+        which remains the ecology eating helper.  Here we evaluate whether this
+        fish should prefer isolated individual pursuit, cooperative baitball
+        pressure/strike, COM tracking, or no target.
         """
-        com_x = cx / n
-        com_y = cy / n
-        w_dist     = cfg.sailfish_target_dist_weight
-        w_iso      = cfg.sailfish_target_isolation_weight
-        w_spd      = cfg.sailfish_target_speed_weight
-        inv_acq_r2 = 1.0 / acq_r2
-        inv_awa_r2 = 1.0 / (
-            cfg.radius_sailfish_awareness * cfg.radius_sailfish_awareness
+        if not sardines:
+            return _HuntingDecision(_DECISION_NONE)
+
+        cfg = self._config
+        px = float(self.position[0])
+        py = float(self.position[1])
+        com_x, com_y = self._local_school_com(sardines, px, py)
+        hunger = self._hunger_aggression()
+
+        acq_r = cfg.sailfish_target_acquire_radius
+        acq_r2 = acq_r * acq_r
+        candidates: list[tuple[float, float, float, object]] = []
+        for s in sardines:
+            dx = s._gx - px
+            dy = s._gy - py
+            if dx > self._hw:
+                dx -= self._W
+            elif dx < -self._hw:
+                dx += self._W
+            if dy > self._hh:
+                dy -= self._H
+            elif dy < -self._hh:
+                dy += self._H
+            d2 = dx * dx + dy * dy
+            if d2 <= acq_r2:
+                candidates.append((dx, dy, d2, s))
+
+        best_s = None
+        best_individual_score = -1e18
+        if candidates:
+            shared_counts: dict[int, int] = {}
+            if self._sailfish_grid is not None:
+                sf_nb = self._sailfish_grid.query(self, cfg.sailfish_target_acquire_radius)
+                for other in sf_nb:
+                    ot = other._target_sardine
+                    if ot is None:
+                        continue
+                    k = id(ot)
+                    shared_counts[k] = shared_counts.get(k, 0) + 1
+            for dx, dy, d2, s in candidates:
+                score = self._score_individual_candidate(
+                    sardine=s,
+                    dx=dx,
+                    dy=dy,
+                    d2=d2,
+                    com_x=com_x,
+                    com_y=com_y,
+                    baitball=baitball,
+                    hunger=hunger,
+                    shared_count=shared_counts.get(id(s), 0),
+                )
+                if score > best_individual_score:
+                    best_individual_score = score
+                    best_s = s
+
+        baitball_score = -1e18
+        can_orbit = self._should_enter_orbit_baitball(baitball)
+        if can_orbit and baitball is not None:
+            baitball_score = self._score_baitball_choice(baitball, hunger)
+
+        # ORBIT_BAITBALL is chosen when cooperative pressure clearly dominates.
+        if (
+            can_orbit
+            and baitball is not None
+            and baitball_score >= best_individual_score + cfg.sailfish_target_decision_margin
+        ):
+            if (
+                self.state == "orbit_baitball"
+                and self._orbit_timer >= self._orbit_patience_goal
+                and self._should_start_baitball_strike(baitball)
+            ):
+                return _HuntingDecision(_DECISION_STRIKE, baitball=baitball)
+            return _HuntingDecision(_DECISION_ORBIT, baitball=baitball)
+
+        # Individual lock is allowed unless cooperative suppression is active
+        # and this target is not in the baitball edge band.
+        if best_s is not None:
+            if (
+                baitball is not None
+                and cfg.sailfish_target_lock_suppressed_near_baitball
+                and self._should_enter_orbit_baitball(baitball)
+                and not self._is_target_on_baitball_edge(best_s, baitball)
+            ):
+                return _HuntingDecision(_DECISION_ORBIT, baitball=baitball)
+            return _HuntingDecision(_DECISION_ISOLATED, target=best_s, baitball=baitball)
+
+        # If sardines are visible but no acquirable candidate exists, continue
+        # tracking school COM (or orbit if a strong baitball exists).
+        if can_orbit and baitball is not None:
+            return _HuntingDecision(_DECISION_ORBIT, baitball=baitball)
+        return _HuntingDecision(_DECISION_COM, baitball=baitball)
+
+    def _score_individual_candidate(
+        self,
+        sardine: object,
+        dx: float,
+        dy: float,
+        d2: float,
+        com_x: float,
+        com_y: float,
+        baitball: "_BaitballInfo | None",
+        hunger: float,
+        shared_count: int,
+    ) -> float:
+        """Score one sardine target (higher is better)."""
+        cfg = self._config
+        acq_r2 = max(1e-6, cfg.sailfish_target_acquire_radius ** 2)
+        awa_r = max(1e-6, cfg.radius_sailfish_awareness)
+        max_spd2 = max(1e-6, cfg.sardine_max_speed * cfg.sardine_max_speed)
+
+        dist_norm = 1.0 - min(d2 / acq_r2, 1.0)
+        iso_dist = math.sqrt((dx - com_x) ** 2 + (dy - com_y) ** 2)
+        iso_norm = min(1.0, iso_dist / awa_r)
+        spd2 = sardine._gvx * sardine._gvx + sardine._gvy * sardine._gvy
+        vuln_speed = 1.0 - min(spd2 / max_spd2, 1.0)
+
+        edge_norm = 0.0
+        if baitball is not None and baitball.radius > 1e-6:
+            bdx = float(sardine._gx) - baitball.cx
+            bdy = float(sardine._gy) - baitball.cy
+            if bdx > self._hw:
+                bdx -= self._W
+            elif bdx < -self._hw:
+                bdx += self._W
+            if bdy > self._hh:
+                bdy -= self._H
+            elif bdy < -self._hh:
+                bdy += self._H
+            edge_norm = min(1.0, math.sqrt(bdx * bdx + bdy * bdy) / baitball.radius)
+
+        return (
+            cfg.sailfish_target_dist_weight * dist_norm
+            + cfg.sailfish_target_isolation_weight * iso_norm
+            + cfg.sailfish_target_speed_weight * vuln_speed
+            + cfg.sailfish_target_edge_weight * edge_norm
+            + cfg.sailfish_target_hunger_weight * hunger
+            - cfg.sailfish_target_shared_penalty_weight * shared_count
         )
-        max_spd2 = cfg.sardine_max_speed * cfg.sardine_max_speed
 
-        best_score = -1e18
-        best_s     = None
-        alt_score  = -1e18
-        alt_s      = None
+    def _score_baitball_choice(self, baitball: "_BaitballInfo", hunger: float) -> float:
+        """Score whether cooperative baitball pressure is preferable."""
+        cfg = self._config
+        px = float(self.position[0])
+        py = float(self.position[1])
+        dx = baitball.cx - px
+        dy = baitball.cy - py
+        if dx > self._hw:
+            dx -= self._W
+        elif dx < -self._hw:
+            dx += self._W
+        if dy > self._hh:
+            dy -= self._H
+        elif dy < -self._hh:
+            dy += self._H
 
-        for dx, dy, d2, s in candidates:
-            iso_d2 = (dx - com_x) ** 2 + (dy - com_y) ** 2
-            s_spd2 = s._gvx * s._gvx + s._gvy * s._gvy
-            score  = (
-                w_dist * (1.0 - d2    * inv_acq_r2)
-                + w_iso  * iso_d2 * inv_awa_r2
-                + w_spd  * (1.0 - min(s_spd2 / max_spd2, 1.0))
-            )
-            if score > best_score:
-                alt_score, alt_s = best_score, best_s
-                best_score, best_s = score, s
-            elif score > alt_score:
-                alt_score, alt_s = score, s
+        edge_dist = max(0.0, math.sqrt(dx * dx + dy * dy) - baitball.radius)
+        edge_near = 1.0 - min(1.0, edge_dist / max(1.0, cfg.radius_sailfish_awareness))
+        dens_rel = max(0.0, baitball.density - cfg.sailfish_baitball_density_threshold)
+        dens_norm = min(1.0, dens_rel / max(0.05, cfg.sailfish_baitball_density_threshold))
+        radius_norm = min(1.0, baitball.radius / max(1.0, cfg.sailfish_target_drop_radius))
 
-        # Shared-target reduction: if a nearby sailfish already holds best_s
-        # and an alternative exists, yield best_s to the neighbour.
-        if self._sailfish_grid is not None and alt_s is not None:
-            sf_nb = self._sailfish_grid.query(
-                self, cfg.sailfish_target_acquire_radius
-            )
-            if any(other._target_sardine is best_s for other in sf_nb):
-                best_s = alt_s
+        available = max(0.0, float(self._sailfish_count - self._active_baitball_strikes))
+        coop_norm = min(1.0, available / max(1.0, float(cfg.sailfish_herding_min_sailfish)))
+        if self._group_strike_cooldown_timer > 0.0:
+            coop_norm *= 0.5
 
-        return best_s  # type: ignore[return-value]
+        return (
+            cfg.sailfish_baitball_score_edge_weight * edge_near
+            + cfg.sailfish_baitball_score_density_weight * dens_norm
+            + cfg.sailfish_baitball_score_radius_weight * radius_norm
+            + cfg.sailfish_baitball_score_coop_weight * coop_norm
+            + cfg.sailfish_target_hunger_weight * (hunger * 0.5)
+        )
 
     def _select_active_baitball(self, dt: float) -> "_BaitballInfo | None":
-        """Choose nearest baitball this frame with short memory fallback."""
+        """Choose nearest baitball this frame with short memory fallback.
+
+        Baitballs are ranked by *edge* distance (center_dist - baitball.radius)
+        rather than center distance.  This correctly handles the case where a
+        large baitball (high radius) is actually closer at its perimeter than a
+        smaller one despite having a more distant center.
+        """
         if not self._config.sailfish_baitball_enabled:
             self._baitball = None
             self._baitball_memory_timer = 0.0
@@ -798,7 +933,7 @@ class Sailfish(Boid):
         px = float(self.position[0])
         py = float(self.position[1])
         best = None
-        best_d2 = float("inf")
+        best_edge_dist = float("inf")
         for b in self._baitballs_frame:
             dx = b.cx - px
             dy = b.cy - py
@@ -810,9 +945,11 @@ class Sailfish(Boid):
                 dy -= self._H
             elif dy < -self._hh:
                 dy += self._H
-            d2 = dx * dx + dy * dy
-            if d2 < best_d2:
-                best_d2 = d2
+            # Edge distance: how far this sailfish is from the baitball perimeter.
+            # Negative when the sailfish is inside the baitball (treated as 0).
+            edge_dist = math.sqrt(dx * dx + dy * dy) - b.radius
+            if edge_dist < best_edge_dist:
+                best_edge_dist = edge_dist
                 best = b
 
         if best is not None:
@@ -829,7 +966,20 @@ class Sailfish(Boid):
         return None
 
     def _should_take_individual_target(self, baitball: "_BaitballInfo | None") -> bool:
-        """Suppress eager target-lock while cooperative baitball herding is active."""
+        """Suppress eager target-lock while cooperative baitball herding is active.
+
+        Returns True when individual target acquisition is permitted, False when
+        the cooperative orbit sequence should handle the attack instead.
+
+        When a dense baitball is active and herding conditions are met in
+        TRACK_SCHOOL, ``_should_enter_orbit_baitball`` will already redirect the
+        fish to ORBIT_BAITBALL on the same frame — so this method's suppression
+        path is only reached in the rare case where that redirect was skipped
+        (e.g. orbit conditions check failed mid-transition).  Explicitly return
+        False here rather than testing ``_orbit_timer >= _orbit_patience_goal``
+        (which is always False in TRACK_SCHOOL because the timer is only
+        incremented inside the ORBIT_BAITBALL block).
+        """
         cfg = self._config
         if not cfg.sailfish_herding_enabled or baitball is None:
             return True
@@ -839,8 +989,12 @@ class Sailfish(Boid):
             return True
         if not cfg.sailfish_target_lock_suppressed_near_baitball:
             return True
-        # Require cooperative orbit patience before individual lock.
-        return self._orbit_timer >= self._orbit_patience_goal
+        # All cooperative-orbit conditions are met: suppress individual lock so
+        # the baitball orbit sequence handles the attack.  The old code here
+        # tested _orbit_timer >= _orbit_patience_goal, which was always False in
+        # TRACK_SCHOOL (timer not incremented there), making this effectively
+        # the same as returning False.  Made explicit for clarity.
+        return False
 
     def _should_enter_orbit_baitball(self, baitball: "_BaitballInfo | None") -> bool:
         """Return True when cooperative orbit should be preferred."""
